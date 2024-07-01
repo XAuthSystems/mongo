@@ -166,6 +166,9 @@ public:
                 }
             }();
             result.appendNumber("rangeDeleterTasks", nRangeDeletions);
+
+            auto configServerInShardCache = grid->shardRegistry()->cachedClusterHasConfigShard();
+            result.appendBool("configServerInShardCache", configServerInShardCache.value_or(false));
         }
 
         reportDataTransformMetrics(opCtx, &result);

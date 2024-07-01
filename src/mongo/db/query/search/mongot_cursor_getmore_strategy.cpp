@@ -31,7 +31,11 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/query/getmore_command_gen.h"
+#include "mongo/db/query/search/internal_search_cluster_parameters_gen.h"
 #include "mongo/db/query/search/mongot_cursor.h"
+#include "mongo/db/server_parameter.h"
+#include "mongo/db/server_parameter_with_storage.h"
+#include "mongo/util/overloaded_visitor.h"
 
 namespace mongo {
 namespace executor {
@@ -39,13 +43,13 @@ namespace executor {
 MongotTaskExecutorCursorGetMoreStrategy::MongotTaskExecutorCursorGetMoreStrategy(
     std::function<boost::optional<long long>()> calcDocsNeededFn,
     boost::optional<long long> startingBatchSize,
-    DocsNeededBounds minDocsNeededBounds,
-    DocsNeededBounds maxDocsNeededBounds)
+    DocsNeededBounds docsNeededBounds,
+    boost::optional<TenantId> tenantId)
     : _calcDocsNeededFn(calcDocsNeededFn),
       _currentBatchSize(startingBatchSize),
-      _minDocsNeededBounds(minDocsNeededBounds),
-      _maxDocsNeededBounds(maxDocsNeededBounds),
-      _batchSizeHistory({}) {
+      _docsNeededBounds(docsNeededBounds),
+      _batchSizeHistory({}),
+      _tenantId(tenantId) {
     if (startingBatchSize.has_value()) {
         _batchSizeHistory.emplace_back(*startingBatchSize);
     }
@@ -86,16 +90,33 @@ long long MongotTaskExecutorCursorGetMoreStrategy::_getNextBatchSize(
     // Don't increase batchSize if the previous batch was returned without filling to the requested
     // batchSize. That indicates the BSON limit was reached, which likely could happen again.
     if (prevBatchNumReceived == *_currentBatchSize) {
+        auto batchSizeGrowthFactor =
+            ServerParameterSet::getClusterParameterSet()
+                ->get<ClusterParameterWithStorage<InternalSearchOptions>>("internalSearchOptions")
+                ->getValue(_tenantId)
+                .getBatchSizeGrowthFactor();
         // In case the growth factor is small enough that the next batchSize rounds back to the
         // previous batchSize, we use std::ceil to make sure it always grows by at least 1,
         // unless the growth factor is exactly 1.
-        _currentBatchSize = std::ceil(*_currentBatchSize * kInternalSearchBatchSizeGrowthFactor);
+        _currentBatchSize = std::ceil(*_currentBatchSize * batchSizeGrowthFactor);
     }
     _batchSizeHistory.emplace_back(*_currentBatchSize);
     return *_currentBatchSize;
 }
 
-bool MongotTaskExecutorCursorGetMoreStrategy::shouldPrefetch() const {
+bool MongotTaskExecutorCursorGetMoreStrategy::_mustNeedAnotherBatch(
+    long long totalNumReceived) const {
+    return visit(
+        OverloadedVisitor{
+            [totalNumReceived](long long minBounds) { return (totalNumReceived < minBounds); },
+            [](docs_needed_bounds::NeedAll minBounds) { return true; },
+            [](docs_needed_bounds::Unknown minBounds) { return false; },
+        },
+        _docsNeededBounds.getMinBounds());
+}
+
+bool MongotTaskExecutorCursorGetMoreStrategy::shouldPrefetch(long long totalNumReceived,
+                                                             long long numBatchesReceived) const {
     // If we aren't sending batchSize to mongot, then we prefetch the next batch, unless we have a
     // discrete maximum bounds used to set docsRequested. When docsRequested is set, we
     // optimistically assume that we will only need a single batch and attempt to avoid doing
@@ -103,11 +124,14 @@ bool MongotTaskExecutorCursorGetMoreStrategy::shouldPrefetch() const {
     // able to satisfy the limit, then we will fetch the next batch syncronously on the subsequent
     // 'getNext()' call.
     if (!_currentBatchSize.has_value()) {
-        return !std::holds_alternative<long long>(_maxDocsNeededBounds);
+        return !std::holds_alternative<long long>(_docsNeededBounds.getMaxBounds());
     }
 
-    // TODO SERVER-86739 Enable pre-fetching for queries that use batchSize tuning.
-    return false;
+    if (_mustNeedAnotherBatch(totalNumReceived)) {
+        return true;
+    }
+    return std::holds_alternative<docs_needed_bounds::Unknown>(_docsNeededBounds.getMaxBounds()) &&
+        numBatchesReceived >= kAlwaysPrefetchAfterNBatches;
 }
 
 }  // namespace executor

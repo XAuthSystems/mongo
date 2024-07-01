@@ -515,7 +515,7 @@ Status ReplicationCoordinatorNoOp::processReplSetRequestVotes(OperationContext*,
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::prepareReplMetadata(const CommonRequestArgs&,
+void ReplicationCoordinatorNoOp::prepareReplMetadata(const GenericArguments&,
                                                      const OpTime&,
                                                      BSONObjBuilder*) const {
     MONGO_UNREACHABLE;
@@ -655,6 +655,10 @@ OpTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTime() const {
 
 OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTimeAndWallTime(
     bool rollbackSafe) const {
+    MONGO_UNREACHABLE;
+}
+
+bool ReplicationCoordinatorNoOp::isDataConsistent() const {
     MONGO_UNREACHABLE;
 }
 

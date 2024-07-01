@@ -46,7 +46,6 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/db/common_request_args_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -66,6 +65,7 @@
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/util/duration.h"
@@ -999,7 +999,7 @@ public:
      * Prepares a metadata object with the ReplSetMetadata and the OplogQueryMetadata depending
      * on what has been requested.
      */
-    virtual void prepareReplMetadata(const CommonRequestArgs& requestArgs,
+    virtual void prepareReplMetadata(const GenericArguments& genericArgs,
                                      const OpTime& lastOpTimeFromClient,
                                      BSONObjBuilder* builder) const = 0;
 
@@ -1277,9 +1277,26 @@ public:
     virtual boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) = 0;
 
     /**
+     * Called when a consistent (to a point-in-time) copy of data is available. That's:
+     *   - After replSetInitiate
+     *   - After initial sync completes (for both logical and file-copy based initial sync)
+     *   - After rollback to stable timestamp
+     *   - After storage startup from a stable checkpoint
+     *   - After replication recovery from an unstable checkpoint
+     */
+    virtual void setConsistentDataAvailable(OperationContext* opCtx,
+                                            bool isDataMajorityCommitted) = 0;
+
+    /**
+     * Returns whether data writes are applied against a consistent copy of the data. This should
+     * start to return true after setConsistentDataAvailable is called.
+     */
+    virtual bool isDataConsistent() const = 0;
+
+    /**
      * Returns true if the node undergoes initial sync or rollback.
      */
-    bool isDataRecovering() const;
+    bool isInInitialSyncOrRollback() const;
 
 protected:
     ReplicationCoordinator();

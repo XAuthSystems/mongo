@@ -92,7 +92,6 @@ namespace {
 const std::string kTestingDurableHistoryPinName = "_testing";
 
 using repl::UnreplicatedWritesBlock;
-using std::endl;
 using std::string;
 using std::stringstream;
 
@@ -194,7 +193,7 @@ public:
                           << "collection name " << fullNs.toStringForErrorMsg() << " is not valid");
         }
 
-        int n = cmdObj.getIntField("n");
+        int n = cmdObj["n"].safeNumberInt();
         bool inc = cmdObj.getBoolField("inc");  // inclusive range?
 
         if (n <= 0) {

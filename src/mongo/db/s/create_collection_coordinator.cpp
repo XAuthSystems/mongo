@@ -67,6 +67,7 @@
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/generic_argument_util.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/list_collections_gen.h"
 #include "mongo/db/list_indexes_gen.h"
@@ -142,7 +143,6 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
-
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 MONGO_FAIL_POINT_DEFINE(failAtCommitCreateCollectionCoordinator);
@@ -369,8 +369,9 @@ Status createCollectionLocally(OperationContext* opCtx,
     auto cmd = create_collection_util::makeCreateCommand(opCtx, nss, request);
     BSONObj createRes;
     DBDirectClient localClient(opCtx);
+    APIParameters::get(opCtx).setInfo(cmd);
     // Forward the api check rules enforced by the client
-    auto bson = cmd.toBSON(APIParameters::get(opCtx).toBSON());
+    auto bson = cmd.toBSON();
     localClient.runCommand(nss.dbName(), bson, createRes);
     return getStatusFromCommandResult(createRes);
 }
@@ -470,12 +471,12 @@ bool checkIfCollectionIsEmpty(OperationContext* opCtx,
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, dataShard));
     FindCommandRequest findCommand(nss);
     findCommand.setLimit(1);
-    findCommand.setReadConcern(readConcern.toBSONInner());
+    findCommand.setReadConcern(readConcern);
     Shard::QueryResponse response = uassertStatusOK(recipientShard->runExhaustiveCursorCommand(
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         nss.dbName(),
-        findCommand.toBSON(BSONObj()),
+        findCommand.toBSON(),
         Milliseconds(-1)));
     return response.docs.empty();
 }
@@ -495,12 +496,14 @@ void cleanupPartialChunksFromPreviousAttempt(OperationContext* opCtx,
     // Remove the chunks matching uuid
     ConfigsvrRemoveChunks configsvrRemoveChunksCmd(uuid);
     configsvrRemoveChunksCmd.setDbName(DatabaseName::kAdmin);
+    generic_argument_util::setMajorityWriteConcern(configsvrRemoveChunksCmd);
+    generic_argument_util::setOperationSessionInfo(configsvrRemoveChunksCmd, osi);
 
     const auto swRemoveChunksResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         DatabaseName::kAdmin,
-        CommandHelpers::appendMajorityWriteConcern(configsvrRemoveChunksCmd.toBSON(osi.toBSON())),
+        configsvrRemoveChunksCmd.toBSON(),
         Shard::RetryPolicy::kIdempotent);
 
     uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(swRemoveChunksResult),
@@ -946,26 +949,6 @@ void checkCommandArguments(OperationContext* opCtx,
                               << " Max: " << NamespaceString::MaxNsShardedCollectionLen,
                 originalNss.size() <= NamespaceString::MaxNsShardedCollectionLen);
     }
-
-    if (originalNss.dbName() == DatabaseName::kConfig) {
-        auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-        auto findReponse = uassertStatusOK(
-            configShard->exhaustiveFindOnConfig(opCtx,
-                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                repl::ReadConcernLevel::kMajorityReadConcern,
-                                                originalNss,
-                                                BSONObj(),
-                                                BSONObj(),
-                                                1));
-
-        auto numDocs = findReponse.docs.size();
-
-        // If this is a collection on the config db, it must be empty to be sharded.
-        uassert(ErrorCodes::IllegalOperation,
-                "collections in the config db must be empty to be sharded",
-                numDocs == 0);
-    }
 }
 
 /**
@@ -1020,6 +1003,7 @@ void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
         mainNss.makeTimeseriesBucketsNamespace(),
         critSecReason,
         ShardingCatalogClient::kMajorityWriteConcern,
+        ShardingRecoveryService::FilteringMetadataClearer(),
         throwIfReasonDiffers);
 
     ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
@@ -1027,6 +1011,7 @@ void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
         mainNss,
         critSecReason,
         ShardingCatalogClient::kMajorityWriteConcern,
+        ShardingRecoveryService::FilteringMetadataClearer(),
         throwIfReasonDiffers);
 }
 
@@ -1091,10 +1076,10 @@ void createCollectionOnShards(OperationContext* opCtx,
         createCollectionParticipantRequest.setOptions(collOptions);
         createCollectionParticipantRequest.setIdIndex(idIndex);
         createCollectionParticipantRequest.setIndexes(indexes);
+        generic_argument_util::setOperationSessionInfo(createCollectionParticipantRequest, osi);
+        generic_argument_util::setMajorityWriteConcern(createCollectionParticipantRequest);
 
-        requests.emplace_back(shard,
-                              CommandHelpers::appendMajorityWriteConcern(
-                                  createCollectionParticipantRequest.toBSON(osi.toBSON())));
+        requests.emplace_back(shard, createCollectionParticipantRequest.toBSON());
     }
 
     if (!requests.empty()) {
@@ -1329,14 +1314,7 @@ void commit(OperationContext* opCtx,
 
     if (translatedRequestParams->getTimeseries()) {
         TypeCollectionTimeseriesFields timeseriesFields;
-        auto tsOptions = [&] {
-            // TODO SERVER-85251: We can replace all of this with:
-            //    return *translatedRequestParams->getTimeseries();
-            // Once the next LTS is made.
-            TimeseriesOptions timeseriesOptions = *(translatedRequestParams->getTimeseries());
-            (void)timeseries::validateAndSetBucketingParameters(timeseriesOptions);
-            return timeseriesOptions;
-        }();
+        auto tsOptions = *translatedRequestParams->getTimeseries();
         timeseriesFields.setTimeseriesOptions(std::move(tsOptions));
         coll.setTimeseriesFields(std::move(timeseriesFields));
     }
@@ -1665,9 +1643,17 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                 _doc.setTranslatedRequestParams(_translateRequestParameters(opCtx));
                 _updateStateDocument(opCtx, CreateCollectionCoordinatorDocumentLegacy(_doc));
 
+                if (nss().dbName() == DatabaseName::kConfig) {
+                    uassert(ErrorCodes::IllegalOperation,
+                            "collections in the config db must be empty to be sharded",
+                            checkIfCollectionIsEmpty(opCtx, nss(), ShardId::kConfigServerId));
+                    _collectionEmpty = true;
+                } else {
+                    _collectionEmpty = checkIfCollectionIsEmpty(
+                        opCtx, nss(), ShardingState::get(opCtx)->shardId());
+                }
+
                 ShardKeyPattern shardKeyPattern(_doc.getTranslatedRequestParams()->getKeyPattern());
-                _collectionEmpty =
-                    checkIfCollectionIsEmpty(opCtx, nss(), ShardingState::get(opCtx)->shardId());
                 _splitPolicy = create_collection_util::createPolicy(
                     opCtx,
                     shardKeyPattern,
@@ -1749,26 +1735,11 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                                                         CommitPhase::kSuccessful);
 
                     LOGV2_DEBUG(5277907, 2, "Collection successfully committed", logAttrs(nss()));
-
-                    forceShardFilteringMetadataRefresh(opCtx, nss());
                 } catch (const DBException& ex) {
-                    LOGV2(
-                        5277908,
-                        "Failed to obtain collection's placement version, so it will be recovered",
-                        logAttrs(nss()),
-                        "error"_attr = redact(ex));
-
-                    // If the refresh fails, then set the placement version to UNKNOWN and let a
-                    // future operation to refresh the metadata.
-
-                    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    {
-                        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
-                        AutoGetCollection autoColl(opCtx, nss(), MODE_IX);
-                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx,
-                                                                                             nss())
-                            ->clearFilteringMetadata(opCtx);
-                    }
+                    LOGV2(5277908,
+                          "Collection commit sequence was interrupted",
+                          logAttrs(nss()),
+                          "error"_attr = redact(ex));
 
                     generateCommitEventForChangeStreams(opCtx,
                                                         nss(),
@@ -1794,6 +1765,8 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                         continue;
                     }
 
+                    // TODO for PR - I am still keeping this for execution in mixed binaries
+                    // clusters.
                     auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardid));
                     shard->runFireAndForgetCommand(
                         opCtx,
@@ -1938,12 +1911,11 @@ void CreateCollectionCoordinator::_exitCriticalSectionOnShards(
     unblockCRUDOperationsRequest.setReason(_critSecReason);
     unblockCRUDOperationsRequest.setClearFilteringMetadata(true);
     unblockCRUDOperationsRequest.setThrowIfReasonDiffers(throwIfReasonDiffers);
-
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest, args);
+        **executor, token, unblockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
 }
 
@@ -2044,12 +2016,18 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
             auto* opCtx = opCtxHolder.get();
             getForwardableOpMetadata().setOn(opCtx);
 
+            auto involvedShards = *_doc.getShardIds();
+            auto addIfNotPresent = [&](const ShardId& shard) {
+                if (std::find(involvedShards.begin(), involvedShards.end(), shard) ==
+                    involvedShards.end())
+                    involvedShards.push_back(shard);
+            };
+
             // The filtering information has been cleared on all participant shards. Here we issue a
             // best effort refresh on all shards involved in the operation to install the correct
             // filtering information.
-            auto involvedShards = *_doc.getShardIds();
-            involvedShards.push_back(ShardingState::get(opCtx)->shardId());
-            involvedShards.push_back(*_doc.getOriginalDataShard());
+            addIfNotPresent(ShardingState::get(opCtx)->shardId());
+            addIfNotPresent(*_doc.getOriginalDataShard());
             sharding_util::triggerFireAndForgetShardRefreshes(opCtx, involvedShards, nss());
 
             if (_firstExecution) {
@@ -2236,8 +2214,22 @@ void CreateCollectionCoordinator::_enterWriteCriticalSectionOnDataShardAndCheckC
                                   {*_doc.getOriginalDataShard()},
                                   CriticalSectionBlockTypeEnum::kWrites);
 
-    _doc.setCollectionIsEmpty(
-        checkIfCollectionIsEmpty(opCtx, nss(), {*_doc.getOriginalDataShard()}));
+    const auto targetIsConfigDb = nss().dbName() == DatabaseName::kConfig;
+    const auto collectionIsEmpty = std::invoke([&, this]() {
+        if (targetIsConfigDb) {
+            return checkIfCollectionIsEmpty(opCtx, nss(), ShardId::kConfigServerId);
+        }
+        return checkIfCollectionIsEmpty(opCtx, nss(), {*_doc.getOriginalDataShard()});
+    });
+
+    if (targetIsConfigDb) {
+        // If this is a collection on the config db, it must be empty to be sharded.
+        uassert(ErrorCodes::IllegalOperation,
+                "collections in the config db must be empty to be sharded",
+                collectionIsEmpty);
+    }
+
+    _doc.setCollectionIsEmpty(collectionIsEmpty);
 }
 
 void CreateCollectionCoordinator::_syncIndexesOnCoordinator(
@@ -2336,11 +2328,11 @@ void CreateCollectionCoordinator::_enterCriticalSectionOnShards(
     blockCRUDOperationsRequest.setBlockType(blockType);
     blockCRUDOperationsRequest.setReason(_critSecReason);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest, args);
+        **executor, token, blockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
 }
 
@@ -2602,12 +2594,6 @@ void CreateCollectionCoordinator::_setPostCommitMetadata(
                                         _request,
                                         *_doc.getTranslatedRequestParams(),
                                         CommitPhase::kSuccessful);
-
-    // Clear the filtering metadata on the coordinator. The participants' metadata will be
-    // cleared in the next phase when the critical sections are released.
-    AutoGetCollection autoColl(opCtx, nss(), MODE_IX);
-    CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss())
-        ->clearFilteringMetadata(opCtx);
 }
 
 void CreateCollectionCoordinator::_exitCriticalSection(

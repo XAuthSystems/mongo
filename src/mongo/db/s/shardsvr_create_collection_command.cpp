@@ -101,13 +101,32 @@ bool requestsShouldBeSerialized(OperationContext* opCtx,
     return true;
 }
 
+boost::optional<ScopedSetShardRole> setShardRoleToUnshardedIfNeeded(OperationContext* opCtx,
+                                                                    const NamespaceString& nss) {
+    auto& oss = OperationShardingState::get(opCtx);
+    if (!oss.getShardVersion(nss) && OperationShardingState::isComingFromRouter(opCtx)) {
+        return ScopedSetShardRole{
+            opCtx, nss, ShardVersion::UNSHARDED(), oss.getDbVersion(nss.dbName())};
+    }
+    return boost::none;
+}
+
 void runCreateCommandDirectClient(OperationContext* opCtx,
                                   NamespaceString ns,
                                   const CreateCommand& cmd) {
+
+    // Set the ShardVersion to UNSHARDED on the OperationShardingState for the given namespace to
+    // make sure we honor the critical section once the ShardVersion is checked. Note that the
+    // critical section will only be checked if there is a ShardVersion attached to the
+    // OperationShardingState.
+    auto shardRole = setShardRoleToUnshardedIfNeeded(opCtx, ns);
+
     BSONObj createRes;
     DBDirectClient localClient(opCtx);
+    CreateCommand c = cmd;
+    APIParameters::get(opCtx).setInfo(c);
     // Forward the api check rules enforced by the client
-    localClient.runCommand(ns.dbName(), cmd.toBSON(APIParameters::get(opCtx).toBSON()), createRes);
+    localClient.runCommand(ns.dbName(), c.toBSON(), createRes);
     auto createStatus = getStatusFromCommandResult(createRes);
     uassertStatusOK(createStatus);
 }
@@ -227,9 +246,7 @@ public:
                 // Validates and sets missing time-series options fields automatically. This may
                 // modify the options by setting default values. Due to modifying the durable
                 // format it is feature flagged to 7.1+
-                if (requestToForward.getTimeseries() &&
-                    gFeatureFlagValidateAndDefaultValuesForShardedTimeseries.isEnabled(
-                        (*optFixedFcvRegion)->acquireFCVSnapshot())) {
+                if (requestToForward.getTimeseries()) {
                     auto timeseriesOptions = *requestToForward.getTimeseries();
                     uassertStatusOK(
                         timeseries::validateAndSetBucketingParameters(timeseriesOptions));

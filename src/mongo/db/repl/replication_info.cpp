@@ -414,9 +414,8 @@ public:
         const auto sc = vts != boost::none
             ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
             : SerializationContext::stateCommandRequest();
-        const auto apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
         auto cmd = idl::parseCommandDocument<HelloCommand>(
-            IDLParserContext("hello", vts, dbName.tenantId(), sc), apiStrict, cmdObj);
+            IDLParserContext("hello", vts, dbName.tenantId(), sc), cmdObj);
 
         shardWaitInHello.execute(
             [&](const BSONObj& customArgs) { _handleHelloFailPoint(customArgs, opCtx, cmdObj); });
@@ -488,13 +487,13 @@ public:
                     // from its client. Once kInternalClient has been set, we assume that any future
                     // "isMaster" commands are forwarded in this manner, and we do not update the
                     // session tags.
-                    if (!opCtx->getClient()->isInternalClient()) {
+                    if (!opCtx->getClient()->isPossiblyUnauthenticatedInternalClient()) {
                         return (originalTags | connectionTagsToSet) & ~connectionTagsToUnset;
                     } else {
                         return originalTags;
                     }
                 });
-            if (!opCtx->getClient()->isInternalClient()) {
+            if (!opCtx->getClient()->isPossiblyUnauthenticatedInternalClient()) {
                 opCtx->getClient()->setIsInternalClient(isInternalClient);
             }
         }

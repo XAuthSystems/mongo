@@ -126,6 +126,7 @@ variables:
       - func: "attach local resmoke invocation"
       - func: "attach multiversion download links"
       - func: "kill processes"
+      - func: "save code coverage data"
       - func: "save mongo coredumps"
       - func: "generate hang analyzer tasks"
       - func: "save failed unittests"
@@ -214,7 +215,7 @@ tasks:
       - func: "run benchmark tests"
         vars:
           suite: benchmarks_first_half
-          exec_timeout_secs: 21600 # 6 hour timeout.
+          exec_timeout_secs: 28800 # 8 hour timeout.
           resmoke_jobs_max: 1
 
   - <<: *benchmark_template
@@ -226,7 +227,7 @@ tasks:
       - func: "run benchmark tests"
         vars:
           suite: benchmarks_second_half
-          exec_timeout_secs: 21600 # 6 hour timeout.
+          exec_timeout_secs: 28800 # 8 hour timeout.
           resmoke_jobs_max: 1
 
   - <<: *benchmark_template
@@ -242,7 +243,7 @@ tasks:
       - func: "run benchmark tests"
         vars:
           suite: benchmarks_sep
-          exec_timeout_secs: 21600 # 6 hour timeout.
+          exec_timeout_secs: 28800 # 8 hour timeout.
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
@@ -1972,7 +1973,7 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
-        "default",
+        "experimental",
         "replica_set_endpoint",
         "requires_all_feature_flags",
       ]
@@ -1999,7 +2000,7 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
-        "default",
+        "experimental",
         "replica_set_endpoint",
         "requires_all_feature_flags",
       ]
@@ -2021,27 +2022,12 @@ tasks:
       - func: "do setup"
       - func: "run tests"
 
-  - <<: *task_template
-    name: sharded_jscore_txns_sharded_collections_with_config_transitions
-    tags:
-      [
-        "assigned_to_jira_team_server_cluster_scalability",
-        "release_critical",
-        "incompatible_mac",
-        "sharding",
-        "jscore",
-        "txns",
-      ]
-    commands:
-      - func: "do setup"
-      - func: "run tests"
-
   - <<: *gen_task_template
     name: sharded_jscore_txns_sharded_collections_with_replica_set_endpoint_gen
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
-        "default",
+        "experimental",
         "replica_set_endpoint",
         "requires_all_feature_flags",
       ]
@@ -2315,11 +2301,10 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
-        "default",
-        "requires_all_feature_flags",
+        "non_deterministic",
+        "resharding_fuzzer",
         "require_npm",
         "random_name",
-        "feature_flag_guarded",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -3062,7 +3047,7 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
-        "default",
+        "experimental",
         "replica_set_endpoint",
         "requires_all_feature_flags",
       ]

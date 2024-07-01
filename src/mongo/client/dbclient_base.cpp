@@ -60,6 +60,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/kill_cursors_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
@@ -87,7 +88,6 @@
 
 namespace mongo {
 
-using std::endl;
 using std::list;
 using std::string;
 using std::stringstream;
@@ -95,7 +95,6 @@ using std::unique_ptr;
 using std::vector;
 
 using executor::RemoteCommandRequest;
-using executor::RemoteCommandResponse;
 
 AtomicWord<long long> DBClientBase::ConnectionIdSequence;
 
@@ -285,10 +284,10 @@ long long DBClientBase::count(const NamespaceStringOrUUID nsOrUuid,
                               int options,
                               int limit,
                               int skip,
-                              boost::optional<BSONObj> readConcernObj) {
+                              boost::optional<repl::ReadConcernArgs> readConcern) {
     auto dbName = nsOrUuid.dbName();
 
-    BSONObj cmd = _countCmd(nsOrUuid, query, options, limit, skip, readConcernObj);
+    BSONObj cmd = _countCmd(nsOrUuid, query, options, limit, skip, readConcern);
     BSONObj res;
     if (!runCommand(dbName, cmd, res, options)) {
         auto status = getStatusFromCommandResult(res);
@@ -303,7 +302,7 @@ BSONObj DBClientBase::_countCmd(const NamespaceStringOrUUID nsOrUuid,
                                 int options,
                                 int limit,
                                 int skip,
-                                boost::optional<BSONObj> readConcernObj) {
+                                boost::optional<repl::ReadConcernArgs> readConcern) {
     BSONObjBuilder b;
     if (nsOrUuid.isUUID()) {
         const auto uuid = nsOrUuid.uuid();
@@ -316,8 +315,8 @@ BSONObj DBClientBase::_countCmd(const NamespaceStringOrUUID nsOrUuid,
         b.append("limit", limit);
     if (skip)
         b.append("skip", skip);
-    if (readConcernObj) {
-        b.append(repl::ReadConcernArgs::kReadConcernFieldName, *readConcernObj);
+    if (readConcern) {
+        b.append(repl::ReadConcernArgs::kReadConcernFieldName, readConcern->toBSONInner());
     }
 
     return b.obj();
@@ -748,7 +747,7 @@ void DBClientBase::killCursor(const NamespaceString& nss, long long cursorId) {
     runFireAndForgetCommand(
         OpMsgRequestBuilder::create(_createInnerRequestVTS(nss.tenantId()),
                                     nss.dbName(),
-                                    KillCursorsCommandRequest(nss, {cursorId}).toBSON(BSONObj{})));
+                                    KillCursorsCommandRequest(nss, {cursorId}).toBSON()));
 }
 
 namespace {

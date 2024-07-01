@@ -1,8 +1,11 @@
 /**
  * Tests hedging metrics in the serverStatus output.
  * @tags: [
- *    requires_fcv_70,
- *    temp_disabled_embedded_router_uncategorized,
+ *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    embedded_router_incompatible,
+ *    # Hedged Reads are deprecated in v8.0 and have different defaults than older versions. This
+ *    # test will be removed in 8.0+
+ *    multiversion_incompatible,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -143,7 +146,9 @@ try {
     setCommandDelay(sortedNodes[0], "count", kBlockCmdTimeMS, ns);
 
     // Make the hedged request block for a while to allow the operation to start on the other node.
-    setCommandDelay(sortedNodes[1], "count", 100, ns);
+    // The delay is intentionally large so we avoid the race where a killOp can arrive before the
+    // request.
+    setCommandDelay(sortedNodes[1], "count", 1000, ns);
 
     const comment = "test_kill_initial_request_" + ObjectId();
     assert.commandWorked(testDB.runCommand({
@@ -174,7 +179,9 @@ try {
     setCommandDelay(sortedNodes[1], "count", kBlockCmdTimeMS, ns);
 
     // Make the initial request block for a while to allow the operation to start on the other node.
-    setCommandDelay(sortedNodes[0], "count", 100, ns);
+    // The delay is intentionally large so we avoid the race where a killOp can arrive before the
+    // request.
+    setCommandDelay(sortedNodes[0], "count", 1000, ns);
 
     const comment = "test_kill_additional_request_" + ObjectId();
     assert.commandWorked(testDB.runCommand({

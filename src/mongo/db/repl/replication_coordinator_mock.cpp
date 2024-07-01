@@ -45,6 +45,7 @@
 #include "mongo/db/repl/hello_response.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/session/internal_session_pool.h"
@@ -711,7 +712,7 @@ Status ReplicationCoordinatorMock::processReplSetRequestVotes(
     return Status::OK();
 }
 
-void ReplicationCoordinatorMock::prepareReplMetadata(const CommonRequestArgs& requestArgs,
+void ReplicationCoordinatorMock::prepareReplMetadata(const GenericArguments& genericArgs,
                                                      const OpTime& lastOpTimeFromClient,
                                                      BSONObjBuilder* builder) const {}
 
@@ -720,8 +721,12 @@ Status ReplicationCoordinatorMock::processHeartbeatV1(const ReplSetHeartbeatArgs
     return Status::OK();
 }
 
+void ReplicationCoordinatorMock::setWriteConcernMajorityShouldJournal(bool shouldJournal) {
+    _writeConcernMajorityShouldJournal = shouldJournal;
+}
+
 bool ReplicationCoordinatorMock::getWriteConcernMajorityShouldJournal() {
-    return true;
+    return _writeConcernMajorityShouldJournal;
 }
 
 long long ReplicationCoordinatorMock::getTerm() const {
@@ -907,6 +912,17 @@ SplitPrepareSessionManager* ReplicationCoordinatorMock::getSplitPrepareSessionMa
 
 boost::optional<UUID> ReplicationCoordinatorMock::getInitialSyncId(OperationContext* opCtx) {
     return uassertStatusOK(UUID::parse("00000000-0000-0000-0000-000000000000"));
+}
+
+void ReplicationCoordinatorMock::setConsistentDataAvailable(OperationContext* opCtx,
+                                                            bool isDataMajorityCommitted) {
+    ReplicaSetAwareServiceRegistry::get(opCtx->getServiceContext())
+        .onConsistentDataAvailable(opCtx, isDataMajorityCommitted, getMemberState().rollback());
+}
+
+bool ReplicationCoordinatorMock::isDataConsistent() const {
+    // Assume data is always consistent in unittests except during initial sync.
+    return !getMemberState().startup2();
 }
 
 }  // namespace repl

@@ -213,8 +213,9 @@ executor:
         TestData:
           transitioningConfigShard: true
   hooks:
-    - class: ContinuousConfigShardTransition
+    - class: ContinuousAddRemoveShard
       random_balancer_on: false
+      transition_configsvr: true
     - class: CheckReplDBHash
     - class: CheckMetadataConsistencyInBackground
       shell_options:
@@ -238,6 +239,7 @@ executor:
         orphanCleanupDelaySecs: 1
         skipDroppingHashedShardKeyIndex: true
         featureFlagReshardingForTimeseries: true
+        reshardingMinimumOperationDurationMillis: 0
     set_cluster_parameter:
       parameter: pauseMigrationsDuringMultiUpdates
       value:

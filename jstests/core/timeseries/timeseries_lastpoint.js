@@ -32,9 +32,10 @@
  *   # "Explain of a resolved view must be executed by mongos"
  *   directly_against_shardsvrs_incompatible,
  *   tenant_migration_incompatible,
- *   # TODO SERVER-89764 a concurrent moveCollection during insertion can cause the bucket
- *   # collection to insert more documents then expected by the test.
+ *   # Buckets being closed during resharding can cause the bucket ranges in this test to vary.
  *   assumes_balancer_off,
+ *   # Some optimization is done in 7.2, some tests may fail prior to 7.2.
+ *   requires_fcv_72,
  * ]
  *
  */
@@ -78,7 +79,7 @@ let lpx2 = undefined;  // lastpoint value of x for m = 2
     coll.insert({t: timestamps.t3, m: 1, x: 3});  // add to bucket #1
 
     // An event with a different meta goes into a separate bucket.
-    coll.insert({t: timestamps.t6, m: 2, x: 6})
+    coll.insert({t: timestamps.t6, m: 2, x: 6});
     lpx2 = 6;
 
     // If this assert fails it would mean that bucket creation logic have changed. The lastpoint
@@ -185,6 +186,14 @@ const casesNoLastpointOptimization = [
     [
         {$addFields: {mm: {$add: [1, "$m"]}}},
         {$group: {_id: "$mm", acc: {$bottom: {sortBy: {t: 1}, output: ["$x"]}}}}
+    ],
+
+    // Fields computed from 'metaField' cannot be used in the $group stage. Pushing down the
+    // computed fields 'mm' would disable the last point optimization, as the optimization relies
+    // that the 'control' block summaries which may have been invlidated by the $addFields pushdown.
+    [
+        {$addFields: {mm: {$add: [42, "$m"]}}},
+        {$group: {_id: "$m", acc: {$bottom: {sortBy: {t: 1}, output: ["$x", "$mm"]}}}}
     ],
 ];
 
@@ -314,16 +323,7 @@ const casesLastpointOptimization = [
             {$group: {_id: "$m", acc: {$bottomN: {n: 1, sortBy: {t: 1}, output: ["$x"]}}}}
         ],
         expectedResult: [{_id: 1, acc: [[lpx1]]}]
-    },
-
-    // Fields computed from 'metaField' can be used in the acc.
-    {
-        pipeline: [
-            {$addFields: {mm: {$add: [42, "$m"]}}},
-            {$group: {_id: "$m", acc: {$bottom: {sortBy: {t: 1}, output: ["$x", "$mm"]}}}}
-        ],
-        expectedResult: [{_id: 1, acc: [lpx1, 1 + 42]}, {_id: 2, acc: [lpx2, 2 + 42]}]
-    },
+    }
 ];
 
 // When there is a suitable index, DISTINCT_SCAN optimization should kick in. We only sanity test
@@ -405,7 +405,7 @@ const casesLastpointWithDistinctScan = [
             // The lastpoint opt currently isn't lowered to SBE.
             assert(false,
                    `Lastpoint opt isn't implemented in SBE for pipeline ${
-                       tojson(pipeline)} but got ${tojson(explainFull)}`)
+                       tojson(pipeline)} but got ${tojson(explainFull)}`);
         }
 
         // Check that the result matches the expected by the test case.
@@ -445,7 +445,7 @@ const casesLastpointWithDistinctScan = [
             // The distinct scan opt currently isn't lowered to SBE.
             assert(false,
                    `Lastpoint opt isn't implemented in SBE for pipeline ${
-                       tojson(pipeline)} but got ${tojson(explainFull)}`)
+                       tojson(pipeline)} but got ${tojson(explainFull)}`);
         }
 
         // Check that the result matches the expected by the test case.

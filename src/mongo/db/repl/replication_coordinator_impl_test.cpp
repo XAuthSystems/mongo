@@ -44,7 +44,6 @@
 #include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
-#include "mongo/db/common_request_args_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
@@ -77,6 +76,7 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -111,7 +111,6 @@ using executor::RemoteCommandResponse;
 using rpc::OplogQueryMetadata;
 using rpc::ReplSetMetadata;
 using unittest::assertGet;
-using unittest::EnsureFCV;
 
 typedef ReplicationCoordinator::ReplSetReconfigArgs ReplSetReconfigArgs;
 // Helper class to wrap Timestamp as an OpTime with term 1.
@@ -380,6 +379,8 @@ TEST_F(ReplCoordTest,
     ASSERT_OK(status);
     ASSERT(getReplCoord()->getSettings().isReplSet());
     ASSERT_TRUE(getExternalState()->threadsStarted());
+    // Test that data is marked consistent after successful replSetInitiate.
+    ASSERT_TRUE(getReplCoord()->isDataConsistent());
 
     // Show that initiate fails after it has already succeeded.
     doReplSetInitiate(getReplCoord(), defaultConfigOneNode, &status);
@@ -1332,7 +1333,6 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     ASSERT_FALSE(rwcDefaults.getImplicitDefaultWriteConcernMajority_forTest());
 }
 
-
 TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedWhenAWriteConcernTimesOutBeforeBeingSatisified) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
@@ -1359,8 +1359,9 @@ TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedWhenAWriteConcernTimesOutBefo
     OpTimeWithTermOne time3(100, 3);
 
     WriteConcernOptions writeConcern;
-    writeConcern.wDeadline = getNet()->now() + Milliseconds(50);
+    writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     writeConcern.w = 2;
+    Date_t timeoutTime = getNet()->now() + Milliseconds(50);
 
     // 1 waiter waiting for 2 nodes to reach time2 with timeout.
     awaiter.setOpTime(time2);
@@ -1370,8 +1371,8 @@ TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedWhenAWriteConcernTimesOutBefo
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
     {
         NetworkInterfaceMock::InNetworkGuard inNet(getNet());
-        getNet()->runUntil(writeConcern.wDeadline);
-        ASSERT_EQUALS(writeConcern.wDeadline, getNet()->now());
+        getNet()->runUntil(timeoutTime);
+        ASSERT_EQUALS(timeoutTime, getNet()->now());
     }
     ReplicationCoordinator::StatusAndDuration statusAndDur = awaiter.getResult();
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
@@ -4214,6 +4215,132 @@ TEST_F(ReplCoordTest, AwaitHelloResponseReturnsErrorOnHorizonChange) {
     getHelloThread.join();
 }
 
+TEST_F(ReplCoordTest, ServerUassertAfterStaleHorizonTopology) {
+    init();
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 2 << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id" << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id" << 1))),
+                       HostAndPort("node1", 12345));
+
+    // Become primary.
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(OpTimeWithTermOne(100, 1),
+                                                        Date_t() + Seconds(100));
+    simulateSuccessfulV1Election();
+    ASSERT(getReplCoord()->getMemberState().primary());
+
+    auto maxAwaitTime = Milliseconds(5000);
+    auto deadline = getNet()->now() + maxAwaitTime;
+    auto opCtx = makeOperationContext();
+
+    auto topologyVersionBeforeReconfig = getTopoCoord().getTopologyVersion();
+    // awaitHelloResponse blocks and waits on a future when the request TopologyVersion equals
+    // the current TopologyVersion of the server.
+    stdx::thread getHelloThread([&] {
+        ASSERT_THROWS_CODE(
+            awaitHelloWithNewOpCtx(getReplCoord(), topologyVersionBeforeReconfig, {}, deadline),
+            AssertionException,
+            ErrorCodes::SplitHorizonChange);
+    });
+
+    auto lastHorizonBeforeReconfig = getReplCoord()->getLastHorizonChange_forTest();
+    ASSERT_EQUALS(lastHorizonBeforeReconfig, -1);
+
+    BSONObjBuilder garbage;
+    ReplSetReconfigArgs args;
+    // Use force to bypass the oplog commitment check, which we're not worried about testing here.
+    args.force = true;
+    // Do a reconfig that changes the SplitHorizon and also adds a third node. This should respond
+    // to all waiting hello requests with an error.
+    args.newConfigObj = BSON("_id"
+                             << "mySet"
+                             << "version" << 3 << "protocolVersion" << 1 << "members"
+                             << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                      << "node1:12345"
+                                                      << "priority" << 3 << "horizons"
+                                                      << BSON("testhorizon"
+                                                              << "test.monkey.example.com:24"))
+                                           << BSON("_id" << 1 << "host"
+                                                         << "node2:12345"
+                                                         << "horizons"
+                                                         << BSON("testhorizon"
+                                                                 << "test.giraffe.example.com:25"))
+                                           << BSON("_id"
+                                                   << 2 << "host"
+                                                   << "node3:12345"
+                                                   << "horizons"
+                                                   << BSON("testhorizon"
+                                                           << "test.elephant.example.com:26"))));
+    stdx::thread reconfigThread([&] {
+        Status status(ErrorCodes::InternalError, "Not Set");
+        status = getReplCoord()->processReplSetReconfig(opCtx.get(), args, &garbage);
+        ASSERT_OK(status);
+    });
+    replyToReceivedHeartbeatV1();
+    reconfigThread.join();
+    getHelloThread.join();
+
+    // After reconfig, the last horizon change topology counter should come out greater than the
+    // input topology counter , but less than the output topology counter.
+    ASSERT_GREATER_THAN(getReplCoord()->getLastHorizonChange_forTest(),
+                        topologyVersionBeforeReconfig.getCounter());
+    ASSERT_GREATER_THAN(getTopoCoord().getTopologyVersion().getCounter(),
+                        getReplCoord()->getLastHorizonChange_forTest());
+    ASSERT_GREATER_THAN(getReplCoord()->getLastHorizonChange_forTest(), lastHorizonBeforeReconfig);
+
+    // Send hello with a TopologyVersion older than the TopologyVersion of the last horizon change.
+    auto requestTopologyVersion =
+        TopologyVersion(getTopoCoord().getTopologyVersion().getProcessId(),
+                        getReplCoord()->getLastHorizonChange_forTest() - 1);
+
+    // AwaitHelloResponse should throw uassert with SplitHorizonChange if topology version
+    // corresponds to a stale horizon.
+    ASSERT_THROWS_CODE(awaitHelloWithNewOpCtx(getReplCoord(), requestTopologyVersion, {}, deadline),
+                       DBException,
+                       ErrorCodes::SplitHorizonChange);
+
+    // Send hello with a TopologyVersion version equal to the TopologyVersion of the last horizon
+    // change.
+    auto expectedTopologyVersion = getTopoCoord().getTopologyVersion();
+    requestTopologyVersion = TopologyVersion(expectedTopologyVersion.getProcessId(),
+                                             getReplCoord()->getLastHorizonChange_forTest());
+
+    ASSERT_GREATER_THAN(expectedTopologyVersion.getCounter(), requestTopologyVersion.getCounter());
+    // AwaitHelloResponse should return with a helloResponse that matches expectedTopologyVersion.
+    // Since expectedTopologyVersion > requestTopologyVersion, the call is non-blocking and will
+    // return immediately.
+    auto response = awaitHelloWithNewOpCtx(getReplCoord(), requestTopologyVersion, {}, deadline);
+    auto responseTopologyVersion = response->getTopologyVersion();
+    ASSERT_EQUALS(responseTopologyVersion->getCounter(), expectedTopologyVersion.getCounter());
+    ASSERT_EQUALS(responseTopologyVersion->getProcessId(), expectedTopologyVersion.getProcessId());
+
+    // Setup instance where lastHorizonChange topology counter < request topology counter < server
+    // topology counter. For server topology counter to be greater than both request's and horizon,
+    // we must increment server topology.
+    getTopoCoord().incrementTopologyVersion();
+    expectedTopologyVersion = getTopoCoord().getTopologyVersion();
+    // Send hello with a TopologyVersion version greater than the TopologyVersion of the last
+    // horizon change.
+    requestTopologyVersion = TopologyVersion(getTopoCoord().getTopologyVersion().getProcessId(),
+                                             getReplCoord()->getLastHorizonChange_forTest() + 1);
+
+    ASSERT_GREATER_THAN(expectedTopologyVersion.getCounter(), requestTopologyVersion.getCounter());
+    ASSERT_GREATER_THAN(requestTopologyVersion.getCounter(),
+                        getReplCoord()->getLastHorizonChange_forTest());
+
+    // AwaitHelloResponse should return with a helloResponse that matches expectedTopologyVersion.
+    response = awaitHelloWithNewOpCtx(getReplCoord(), requestTopologyVersion, {}, deadline);
+    responseTopologyVersion = response->getTopologyVersion();
+    ASSERT_EQUALS(responseTopologyVersion->getCounter(), expectedTopologyVersion.getCounter());
+    ASSERT_EQUALS(responseTopologyVersion->getProcessId(), expectedTopologyVersion.getProcessId());
+}
+
 TEST_F(ReplCoordTest, NonAwaitableHelloReturnsNoConfigsOnNodeWithUninitializedConfig) {
     start();
     auto opCtx = makeOperationContext();
@@ -4842,6 +4969,9 @@ TEST_F(ReplCoordTest, AwaitHelloRespondsCorrectlyWhenNodeRemovedAndReadded) {
     });
     waitForHelloFailPoint->waitForTimesEntered(timesEnteredFailPoint + 2);
 
+    auto lastHorizonBeforeReconfig = getReplCoord()->getLastHorizonChange_forTest();
+    ASSERT_EQUALS(lastHorizonBeforeReconfig, -1);
+
     const auto newHorizonNodeOne = "newhorizon.com:100";
     const auto newHorizonNodeTwo = "newhorizon.com:200";
 
@@ -4866,9 +4996,21 @@ TEST_F(ReplCoordTest, AwaitHelloRespondsCorrectlyWhenNodeRemovedAndReadded) {
     });
     replyToReceivedHeartbeatV1();
     reconfigThread.join();
+
     ASSERT_OK(
         getReplCoord()->waitForMemberState(opCtx.get(), MemberState::RS_SECONDARY, Seconds(1)));
     getHelloThread.join();
+
+    ASSERT_GREATER_THAN(getReplCoord()->getLastHorizonChange_forTest(), lastHorizonBeforeReconfig);
+    // Send hello with a TopologyVersion older than the TopologyVersion of the last horizon change.
+    auto requestTopologyVersion =
+        TopologyVersion(getTopoCoord().getTopologyVersion().getProcessId(),
+                        getReplCoord()->getLastHorizonChange_forTest() - 1);
+    // AwaitHelloResponse should throw uassert with SplitHorizonChange if topology version
+    // corresponds to a stale horizon.
+    ASSERT_THROWS_CODE(awaitHelloWithNewOpCtx(getReplCoord(), requestTopologyVersion, {}, deadline),
+                       DBException,
+                       ErrorCodes::SplitHorizonChange);
 
     stdx::thread getHelloThreadNewHorizon([&] {
         const auto expectedTopologyVersion = getTopoCoord().getTopologyVersion();
@@ -6843,12 +6985,14 @@ TEST_F(ReplCoordTest, PrepareOplogQueryMetadata) {
 
     auto opCtx = makeOperationContext();
 
-    auto requestArgs = CommonRequestArgs::parse(
-        IDLParserContext("mockRequest"),
-        BSON(rpc::kOplogQueryMetadataFieldName << 1 << rpc::kReplSetMetadataFieldName << 1 << "$db"
-                                               << "test"));
+    GenericArguments args;
+    BSONObj oplogQueryData = BSON(GenericArguments::kDollarOplogQueryDataFieldName << 1);
+    args.setDollarOplogQueryData(IDLAnyTypeOwned(oplogQueryData.firstElement(), oplogQueryData));
+    BSONObj replData = BSON("$replData" << 1);
+    args.setDollarReplData(IDLAnyTypeOwned(replData.firstElement(), replData));
+
     BSONObjBuilder metadataBob;
-    getReplCoord()->prepareReplMetadata(requestArgs, OpTime(), &metadataBob);
+    getReplCoord()->prepareReplMetadata(std::move(args), OpTime(), &metadataBob);
 
     BSONObj metadata = metadataBob.done();
     LOGV2(21506, "{metadata}", "metadata"_attr = metadata);

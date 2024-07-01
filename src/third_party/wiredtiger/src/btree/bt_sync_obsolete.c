@@ -193,7 +193,7 @@ static int
 __sync_obsolete_cleanup_one(WT_SESSION_IMPL *session, WT_REF *ref)
 {
     WT_DECL_RET;
-    uint8_t new_state, previous_state, ref_state;
+    WT_REF_STATE new_state, previous_state, ref_state;
     bool busy, ref_deleted;
 
     busy = ref_deleted = false;
@@ -335,10 +335,11 @@ __checkpoint_cleanup_page_skip(
 
     /*
      * Reading any page that is not in the cache will increase the cache size. Perform a set of
-     * checks to verify the cache can handle it.
+     * checks to verify the cache can handle it. Checkpoint cleanup leads to more clean pages in the
+     * cache, skip if clean eviction is needed.
      */
     if (__wt_cache_aggressive(session) || __wt_cache_full(session) || __wt_cache_stuck(session) ||
-      __wt_eviction_needed(session, false, false, NULL)) {
+      __wt_eviction_clean_needed(session, NULL)) {
         *skipp = true;
         return (0);
     }

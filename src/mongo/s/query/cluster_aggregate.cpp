@@ -59,13 +59,17 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongos_process_interface.h"
+#include "mongo/db/pipeline/search/document_source_search.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
+#include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
@@ -126,6 +130,24 @@ auto resolveInvolvedNamespaces(const stdx::unordered_set<NamespaceString>& invol
     return resolvedNamespaces;
 }
 
+Document serializeForPassthrough(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                 const AggregateCommandRequest& request) {
+    auto req = request;
+
+    // Reset all generic arguments besides those needed for the aggregation itself.
+    // Other generic arguments that need to be set like txnNumber, lsid, etc. will be attached
+    // later.
+    // TODO: SERVER-90827 Only reset arguments not suitable for passing through to shards.
+    auto maxTimeMS = req.getMaxTimeMS();
+    auto readConcern = req.getReadConcern();
+    auto writeConcern = req.getWriteConcern();
+    req.setGenericArguments({});
+    req.setMaxTimeMS(maxTimeMS);
+    req.setReadConcern(std::move(readConcern));
+    req.setWriteConcern(std::move(writeConcern));
+    return aggregation_request_helper::serializeToCommandDoc(expCtx, req);
+}
+
 // Build an appropriate ExpressionContext for the pipeline. This helper instantiates an appropriate
 // collator, creates a MongoProcessInterface for use by the pipeline's stages, and sets the
 // collection UUID if provided.
@@ -166,8 +188,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     // reconstructed for dispatch to a new shard, which is sometimes necessary for change streams
     // pipelines.
     if (hasChangeStream) {
-        mergeCtx->originalAggregateCommand =
-            aggregation_request_helper::serializeToCommandObj(request);
+        mergeCtx->originalAggregateCommand = serializeForPassthrough(mergeCtx, request).toBson();
     }
 
     return mergeCtx;
@@ -421,8 +442,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         return resolvedNsCM.isSharded();
     };
 
-    liteParsedPipeline.verifyIsSupported(
-        opCtx, isSharded, request.getExplain(), serverGlobalParams.enableMajorityReadConcern);
+    liteParsedPipeline.verifyIsSupported(opCtx, isSharded, request.getExplain());
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     const auto& involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     auto shouldDoFLERewrite = ::mongo::shouldDoFLERewrite(request);
@@ -492,6 +512,8 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         }
     }
 
+    // pipelineBuilder will be invoked within AggregationTargeter::make() if and only if it chooses
+    // any policy other than "specific shard only".
     boost::intrusive_ptr<ExpressionContext> expCtx;
     const auto pipelineBuilder = [&]() {
         auto pipeline =
@@ -535,6 +557,17 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
             // Validate the pipeline post-optimization.
             const bool alreadyOptimized = true;
             pipeline->validateCommon(alreadyOptimized);
+        }
+
+        // TODO SERVER-89546: Ideally extractDocsNeededBounds should be called internally within
+        // DocumentSourceSearch.
+        if (search_helpers::isSearchPipeline(pipeline.get())) {
+            // We won't reach this if the whole pipeline passes through with the "specific shard"
+            // policy. That's okay since the shard will have access to the entire pipeline to
+            // extract accurate bounds.
+            auto bounds = extractDocsNeededBounds(*pipeline.get());
+            auto searchStage = dynamic_cast<mongo::DocumentSourceSearch*>(pipeline->peekFront());
+            searchStage->setDocsNeededBounds(bounds);
         }
         return pipeline;
     };
@@ -629,6 +662,8 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     }
 
     auto status = [&]() {
+        bool requestQueryStatsFromRemotes =
+            query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug());
         try {
             switch (targeter.policy) {
                 case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
@@ -653,7 +688,8 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                             aggregation_request_helper::kDefaultBatchSize),
                         std::move(targeter.pipeline),
                         result,
-                        privileges);
+                        privileges,
+                        requestQueryStatsFromRemotes);
                 }
 
                 case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kAnyShard: {
@@ -661,14 +697,15 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                     return cluster_aggregation_planner::dispatchPipelineAndMerge(
                         opCtx,
                         std::move(targeter),
-                        aggregation_request_helper::serializeToCommandDoc(expCtx, request),
+                        serializeForPassthrough(expCtx, request),
                         request.getCursor().getBatchSize().value_or(
                             aggregation_request_helper::kDefaultBatchSize),
                         namespaces,
                         privileges,
                         result,
                         pipelineDataSource,
-                        eligibleForSampling);
+                        eligibleForSampling,
+                        requestQueryStatsFromRemotes);
                 }
                 case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
                     kSpecificShardOnly: {
@@ -689,11 +726,12 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                         expCtx,
                         namespaces,
                         request.getExplain(),
-                        aggregation_request_helper::serializeToCommandDoc(expCtx, request),
+                        serializeForPassthrough(expCtx, request),
                         privileges,
                         shardId,
                         eligibleForSampling,
-                        result);
+                        result,
+                        requestQueryStatsFromRemotes);
                 }
 
                     MONGO_UNREACHABLE;
@@ -734,7 +772,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         // Add 'command' object to explain output.
         if (expCtx->explain) {
             explain_common::appendIfRoom(
-                aggregation_request_helper::serializeToCommandObj(request), "command", result);
+                serializeForPassthrough(expCtx, request).toBson(), "command", result);
             collectQueryStatsMongos(opCtx,
                                     std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
         }

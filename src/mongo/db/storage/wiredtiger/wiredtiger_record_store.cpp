@@ -356,13 +356,17 @@ void WiredTigerRecordStore::OplogTruncateMarkers::getOplogTruncateMarkersStats(
     }
 }
 
-void WiredTigerRecordStore::OplogTruncateMarkers::awaitHasExcessMarkersOrDead(
+bool WiredTigerRecordStore::OplogTruncateMarkers::awaitHasExcessMarkersOrDead(
     OperationContext* opCtx) {
     // Wait until kill() is called or there are too many collection markers.
     stdx::unique_lock<Latch> lock(_reclaimMutex);
-    while (!_isDead) {
-        {
-            MONGO_IDLE_THREAD_BLOCK;
+    MONGO_IDLE_THREAD_BLOCK;
+    auto isWaitConditionSatisfied = opCtx->waitForConditionOrInterruptFor(
+        _reclaimCv, lock, Seconds(gOplogTruncationCheckPeriodSeconds), [this, opCtx] {
+            if (_isDead) {
+                return true;
+            }
+
             if (auto marker = peekOldestMarkerIfNeeded(opCtx)) {
                 invariant(marker->lastRecord.isValid());
 
@@ -371,11 +375,15 @@ void WiredTigerRecordStore::OplogTruncateMarkers::awaitHasExcessMarkersOrDead(
                             "Collection has excess markers",
                             "lastRecord"_attr = marker->lastRecord,
                             "wallTime"_attr = marker->wallTime);
-                return;
+                return true;
             }
-        }
-        _reclaimCv.wait_for(lock, stdx::chrono::seconds{gOplogTruncationCheckPeriodSeconds});
-    }
+
+            return false;
+        });
+
+    // Return true only when we have detected excess markers, not because the record store
+    // is being destroyed (_isDead) or we timed out waiting on the condition variable.
+    return !(_isDead || !isWaitConditionSatisfied);
 }
 
 bool WiredTigerRecordStore::OplogTruncateMarkers::_hasExcessMarkers(OperationContext* opCtx) const {
@@ -923,32 +931,8 @@ Timestamp WiredTigerRecordStore::getPinnedOplog() const {
     return _kvEngine->getPinnedOplog();
 }
 
-bool WiredTigerRecordStore::yieldAndAwaitOplogDeletionRequest(OperationContext* opCtx) {
-    // Create another reference to the oplog truncate markers while holding a lock on the collection
-    // to prevent it from being destructed.
-    std::shared_ptr<OplogTruncateMarkers> oplogTruncateMarkers = _oplogTruncateMarkers;
-
-    Locker* locker = shard_role_details::getLocker(opCtx);
-    Locker::LockSnapshot snapshot;
-
-    // Release any locks before waiting on the condition variable. It is illegal to access any
-    // methods or members of this record store after this line because it could be deleted.
-    locker->saveLockStateAndUnlock(&snapshot);
-
-    // The top-level locks were freed, so also release any potential low-level (storage engine)
-    // locks that might be held.
-    WiredTigerRecoveryUnit* recoveryUnit =
-        checked_cast<WiredTigerRecoveryUnit*>(shard_role_details::getRecoveryUnit(opCtx));
-    recoveryUnit->abandonSnapshot();
-    recoveryUnit->beginIdle();
-
-    // Wait for an oplog deletion request, or for this record store to have been destroyed.
-    oplogTruncateMarkers->awaitHasExcessMarkersOrDead(opCtx);
-
-    // Reacquire the locks that were released.
-    locker->restoreLockState(opCtx, snapshot);
-
-    return !oplogTruncateMarkers->isDead();
+std::shared_ptr<CollectionTruncateMarkers> WiredTigerRecordStore::getCollectionTruncateMarkers() {
+    return _oplogTruncateMarkers->shared_from_this();
 }
 
 void WiredTigerRecordStore::reclaimOplog(OperationContext* opCtx) {
@@ -2023,19 +2007,9 @@ void WiredTigerRecordStore::doCappedTruncateAfter(
         // transactions from appearing.
         Timestamp truncTs(lastKeptId.getLong());
 
-        if (!serverGlobalParams.enableMajorityReadConcern &&
-            _kvEngine->getOldestTimestamp() > truncTs) {
-            // If majority read concern is disabled, the oldest timestamp can be ahead of 'truncTs'.
-            // In that case, we must set the oldest timestamp along with the commit timestamp.
-            // Otherwise, the commit timestamp will be set behind the oldest timestamp, which is
-            // illegal.
-            const bool force = true;
-            _kvEngine->setOldestTimestamp(truncTs, force);
-        } else {
-            auto conn = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->conn();
-            auto durableTSConfigString = "durable_timestamp={:x}"_format(truncTs.asULL());
-            invariantWTOK(conn->set_timestamp(conn, durableTSConfigString.c_str()), session);
-        }
+        auto conn = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->conn();
+        auto durableTSConfigString = "durable_timestamp={:x}"_format(truncTs.asULL());
+        invariantWTOK(conn->set_timestamp(conn, durableTSConfigString.c_str()), session);
 
         _kvEngine->getOplogManager()->setOplogReadTimestamp(truncTs);
         LOGV2_DEBUG(22405, 1, "truncation new read timestamp: {truncTs}", "truncTs"_attr = truncTs);
@@ -2244,8 +2218,9 @@ boost::optional<Record> WiredTigerRecordStoreCursor::seek(const RecordId& start,
 }
 
 RecordId WiredTigerRecordStoreCursor::seekIdCommon(const RecordId& start,
-                                                   BoundInclusion boundInclusion) {
-    invariant(_hasRestored);
+                                                   BoundInclusion boundInclusion,
+                                                   bool restoring) {
+    invariant(_hasRestored || restoring);
     dassert(shard_role_details::getLocker(_opCtx)->isReadLocked());
 
     // Ensure an active transaction is open.
@@ -2338,18 +2313,15 @@ bool WiredTigerRecordStoreCursor::restore(bool tolerateCappedRepositioning) {
 
     // This will ensure an active session exists, so any restored cursors will bind to it
     invariant(WiredTigerRecoveryUnit::get(_opCtx)->getSession() == _cursor->getSession());
-    _hasRestored = true;
 
     // If we've hit EOF, then this iterator is done and need not be restored.
-    if (_eof) {
+    if (_eof || _lastReturnedId.isNull()) {
+        _hasRestored = true;
         return true;
     }
 
-    if (_lastReturnedId.isNull()) {
-        return true;
-    }
-
-    auto foundId = seekIdCommon(_lastReturnedId, BoundInclusion::kInclude);
+    auto foundId = seekIdCommon(_lastReturnedId, BoundInclusion::kInclude, true /* restoring */);
+    _hasRestored = true;
     if (foundId.isNull()) {
         _eof = true;
         return true;
@@ -2447,18 +2419,15 @@ bool WiredTigerCappedCursorBase::restore(bool tolerateCappedRepositioning) {
 
     // This will ensure an active session exists, so any restored cursors will bind to it
     invariant(WiredTigerRecoveryUnit::get(_opCtx)->getSession() == _cursor->getSession());
-    _hasRestored = true;
 
     // If we've hit EOF, then this iterator is done and need not be restored.
-    if (_eof) {
+    if (_eof || _lastReturnedId.isNull()) {
+        _hasRestored = true;
         return true;
     }
 
-    if (_lastReturnedId.isNull()) {
-        return true;
-    }
-
-    auto foundId = seekIdCommon(_lastReturnedId, BoundInclusion::kInclude);
+    auto foundId = seekIdCommon(_lastReturnedId, BoundInclusion::kInclude, true /* restoring */);
+    _hasRestored = true;
     if (foundId.isNull()) {
         _eof = true;
         // Capped read collscans do not tolerate cursor repositioning. By contrast, write collscans

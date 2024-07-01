@@ -371,6 +371,8 @@ public:
 
     static constexpr bool kCollectsPositionInfo = PositionInfoAppender<Container>;
 
+    void eof() {}
+
     void append(bool val) {
         _last = CMaterializer::materialize(*_allocator, val);
         _collection.push_back(_last);
@@ -536,30 +538,6 @@ public:
     }
 
     /**
-     * Return first non-missing element stored in this BSONColumn
-     */
-    BSONElement first() const;
-
-    /**
-     * Return last non-missing element stored in this BSONColumn
-     */
-    BSONElement last() const;
-
-    /**
-     * Return 'min' element in this BSONColumn.
-     *
-     * TODO: Do we need to specify ComparisonRulesSet here?
-     */
-    BSONElement min(const StringDataComparator* comparator = nullptr) const;
-
-    /**
-     * Return 'max' element in this BSONColumn.
-     *
-     * TODO: Do we need to specify ComparisonRulesSet here?
-     */
-    BSONElement max(const StringDataComparator* comparator = nullptr) const;
-
-    /**
      * Return sum of all elements stored in this BSONColumn.
      *
      * The BSONColumn must only contain NumberInt, NumberLong, NumberDouble, NumberDecimal types,
@@ -676,7 +654,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> alloc
             if (isSimple8bControlByte(*ptr)) {
                 const char* newPtr = nullptr;
                 for (auto&& collector : ownedCollectors) {
-                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
+                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral<int64_t>(
                         ptr, end, collector, lastNonRLEBlock, [&collector](size_t count, uint64_t) {
                             for (size_t i = 0; i < count; ++i) {
                                 collector.appendPositionInfo(1);
@@ -693,7 +671,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> alloc
             if (isSimple8bControlByte(*ptr)) {
                 const char* newPtr = nullptr;
                 for (auto&& collector : ownedCollectors) {
-                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral(
+                    newPtr = BSONColumnBlockDecompressHelpers::decompressAllLiteral<int64_t>(
                         ptr, end, collector, lastNonRLEBlock, [&collector](size_t count, uint64_t) {
                             for (size_t i = 0; i < count; ++i) {
                                 collector.appendPositionInfo(1);

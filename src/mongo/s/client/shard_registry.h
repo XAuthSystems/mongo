@@ -66,6 +66,12 @@
 
 namespace mongo {
 
+namespace shard_registry_stats {
+
+extern Counter64& blockedOpsGauge;
+
+}  // namespace shard_registry_stats
+
 class ShardRegistryData {
 public:
     using ShardMap = stdx::unordered_map<ShardId, std::shared_ptr<Shard>, ShardId::Hasher>;
@@ -349,6 +355,18 @@ public:
      * This method relies on the RSM to have pushed the correct CSRS membership information.
      */
     bool isConfigServer(const HostAndPort& host) const;
+
+    /**
+     * Returns an optional boolean indicating whether the config server is in the shard registry as
+     * a shard.
+     * - If there is cached data available, returns true if the config server is in the shard
+     * registry, and false otherwise.
+     * - If there is no cached data, returns boost::none.
+     *
+     * Note: This function does not refresh the shard registry or perform any network traffic. It is
+     * a non-causally consistent call to the cached data from the shard registry.
+     */
+    boost::optional<bool> cachedClusterHasConfigShard() const;
 
     // TODO SERVER-50206: Remove usage of these non-causally consistent accessors.
     //

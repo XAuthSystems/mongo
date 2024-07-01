@@ -181,12 +181,9 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
 MONGO_FAIL_POINT_DEFINE(disablePipelineOptimization);
 
 using boost::intrusive_ptr;
-using std::endl;
 using std::ostringstream;
 using std::string;
 using std::vector;
-
-namespace dps = ::mongo::dotted_path_support;
 
 using ChangeStreamRequirement = StageConstraints::ChangeStreamRequirement;
 using HostTypeRequirement = StageConstraints::HostTypeRequirement;
@@ -880,6 +877,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     MakePipelineOptions opts) {
     auto pipeline = Pipeline::parse(rawPipeline, expCtx, opts.validator);
 
+    expCtx->initializeReferencedSystemVariables();
+
     bool alreadyOptimized = opts.alreadyOptimized;
 
     if (opts.optimize) {
@@ -894,8 +893,6 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
             pipeline.release(), opts.shardTargetingPolicy, std::move(opts.readConcern));
     }
 
-    expCtx->initializeReferencedSystemVariables();
-
     return pipeline;
 }
 
@@ -909,12 +906,13 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     boost::optional<BSONObj> readConcern;
     // If readConcern is set on opts and aggRequest, assert they are equal.
     if (opts.readConcern && aggRequest.getReadConcern()) {
+        readConcern = aggRequest.getReadConcern()->toBSONInner();
         tassert(7393501,
                 "Read concern on aggRequest and makePipelineOpts must match.",
-                opts.readConcern->binaryEqual(*aggRequest.getReadConcern()));
-        readConcern = aggRequest.getReadConcern();
+                opts.readConcern->binaryEqual(*readConcern));
     } else {
-        readConcern = aggRequest.getReadConcern() ? aggRequest.getReadConcern() : opts.readConcern;
+        readConcern = aggRequest.getReadConcern() ? aggRequest.getReadConcern()->toBSONInner()
+                                                  : opts.readConcern;
     }
 
     auto pipeline = Pipeline::parse(aggRequest.getPipeline(), expCtx, opts.validator);

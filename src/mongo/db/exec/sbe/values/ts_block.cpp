@@ -119,7 +119,9 @@ private:
 };
 
 struct ElementAnalysis {
-    absl::flat_hash_set<const char*> _scalarValues = {};
+    // The set of all scalar values reachable along an arbitrarily deep path containing objects only
+    // (no arrays).
+    absl::flat_hash_set<const char*> _scalarValuesInObjects = {};
     bool _containsArrays = false;
 };
 
@@ -130,11 +132,16 @@ struct ElementAnalysis {
 void analyzeElement(ElementAnalysis& analysis, BSONElement elem) {
     if (elem.type() == BSONType::Array) {
         analysis._containsArrays = true;
+        // Do not recurse into children; elements within arrays are not candidates for path-based
+        // decompression due to challenges with arrays in BSONColumns with legacy interleaved mode.
+        // See SERVER-90712.
+        return;
     }
 
-    // Note: isABSONObj() returns true for both objects and arrays.
+    // Note: isABSONObj() returns true for both objects and arrays. But we just checked that this is
+    // not an array.
     if (!elem.isABSONObj()) {
-        analysis._scalarValues.insert(elem.value());
+        analysis._scalarValuesInObjects.insert(elem.value());
         return;
     }
 
@@ -194,7 +201,7 @@ boost::optional<bsoncolumn::SBEPath> canUsePathBasedDecompression(
             return boost::none;
         }
 
-        if (!elems.empty() && !analysis._scalarValues.contains(elems[0])) {
+        if (!elems.empty() && !analysis._scalarValuesInObjects.contains(elems[0])) {
             return boost::none;
         }
     }
@@ -235,10 +242,11 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
     const BSONObj& bucketObj) {
 
     BSONElement bucketControl = bucketObj[timeseries::kBucketControlFieldName];
-    invariant(!bucketControl.eoo());
+    invariant(bucketControl.type() == BSONType::Object);
+    BSONObj bucketControlObj = bucketControl.Obj();
 
     const size_t noOfMeasurements = [&]() {
-        if (auto ct = bucketControl.Obj()[timeseries::kBucketControlCountFieldName]) {
+        if (auto ct = bucketControlObj[timeseries::kBucketControlCountFieldName]) {
             return static_cast<size_t>(ct.numberLong());
         }
         return static_cast<size_t>(
@@ -248,11 +256,20 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
     const int bucketVersion = bucketObj.getIntField(timeseries::kBucketControlVersionFieldName);
 
     const BSONElement bucketDataElem = bucketObj[timeseries::kBucketDataFieldName];
-    invariant(!bucketDataElem.eoo());
     invariant(bucketDataElem.type() == BSONType::Object);
 
-    // Build a mapping from the top level field name to the bucket's corresponding bson element.
-    StringMap<BSONElement> topLevelFieldToBsonElt;
+    // Build a mapping from the top level field name to the bucket's corresponding bson element and
+    // min/max values.
+    struct FieldInfo {
+        // The actual data in the field, either a BSON object or a BSONColumn.
+        BSONElement data = BSONElement{};
+        BSONElement min = BSONElement{};
+        BSONElement max = BSONElement{};
+    };
+
+    // Populate the 'FieldInfo' data values.
+    StringDataMap<FieldInfo> topLevelFieldNameToInfo;
+    topLevelFieldNameToInfo.reserve(_topLevelFieldToIdxes.size());
     for (auto elt : bucketDataElem.embeddedObject()) {
         auto it = _topLevelFieldToIdxes.find(elt.fieldNameStringData());
         if (it != _topLevelFieldToIdxes.end()) {
@@ -261,44 +278,57 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
                     "Unsupported type for timeseries bucket data",
                     blockTag == value::TypeTags::bsonObject ||
                         blockTag == value::TypeTags::bsonBinData);
-            topLevelFieldToBsonElt[elt.fieldName()] = elt;
+            topLevelFieldNameToInfo.emplace(elt.fieldNameStringData(), FieldInfo{.data = elt});
         }
     }
+
+    // Populate min and max for each 'FieldInfo'.
+    {
+        auto setMinMax = [&topLevelFieldNameToInfo](BSONElement minMaxElt, auto setFn) {
+            if (minMaxElt.type() != BSONType::Object) {
+                return;
+            }
+
+            BSONObj minMaxObj = minMaxElt.Obj();
+            size_t fieldsFound = 0;
+            const size_t nFields = topLevelFieldNameToInfo.size();
+            for (BSONElement elt : minMaxObj) {
+                if (auto it = topLevelFieldNameToInfo.find(elt.fieldNameStringData());
+                    it != topLevelFieldNameToInfo.end()) {
+                    setFn(it->second, elt);
+                    ++fieldsFound;
+                    if (fieldsFound >= nFields) {
+                        break;
+                    }
+                }
+            }
+        };
+
+        setMinMax(bucketControlObj[timeseries::kBucketControlMinFieldName],
+                  [](FieldInfo& fi, BSONElement elt) { fi.min = elt; });
+        setMinMax(bucketControlObj[timeseries::kBucketControlMaxFieldName],
+                  [](FieldInfo& fi, BSONElement elt) { fi.max = elt; });
+    }
+
+    // The time series decoding API gives a couple ways to efficiently decode data:
+    // - A whole BSONColumn binary at a time
+    // - Extracting paths that identify scalar fields in a BSONColumn, as long as there are not
+    //   multi-element arrays along the path
+    // For other kinds of paths, we materialize each top level field as BSON, and then extract from
+    // that. This is awful in terms of performance, but it can be swapped out with a more efficient
+    // implementation when the decoding API can support it efficiently.
 
     std::vector<std::unique_ptr<TsBlock>> outBlocks;
     std::vector<std::unique_ptr<CellBlock>> outCells(_pathReqs.size());
 
-    // The time series decoding API gives us the top level fields only. To simulate an API
-    // which lets us extract more granular paths, we materialize each top level field as BSON,
-    // and then extract from that. This is awful in terms of performance, but it can be swapped
-    // out with a more efficient implementation when a more granular API becomes available.
+    for (auto& [topLevelField, fieldInfo] : topLevelFieldNameToInfo) {
 
-    // TODO SERVER-89810 This could be optimized to avoid some per-bucket allocations.
-    auto createMinMaxMap = [&bucketControl](StringData controlField) {
-        StringDataMap<BSONElement> sdMap;
-        auto controlMap = bucketControl.Obj()[controlField];
-
-        if (controlMap.eoo()) {
-            return sdMap;
-        }
-
-        invariant(controlMap.type() == BSONType::Object);
-
-        for (auto elem : controlMap.Obj()) {
-            sdMap[elem.fieldName()] = elem;
-        }
-        return sdMap;
-    };
-    auto bucketControlMinMap = createMinMaxMap(timeseries::kBucketControlMinFieldName);
-    auto bucketControlMaxMap = createMinMaxMap(timeseries::kBucketControlMaxFieldName);
-
-    for (auto& [topLevelField, columnElt] : topLevelFieldToBsonElt) {
         // The set of indexes in _pathReqs which begin with this top level field.
         const auto& pathIndexesForCurrentField = _topLevelFieldToIdxes[topLevelField];
-        auto [columnTag, columnVal] = bson::convertFrom<true /*View*/>(columnElt);
+        auto [columnTag, columnVal] = bson::convertFrom<true /*View*/>(fieldInfo.data);
 
-        BSONElement fieldMin = bucketControlMinMap[topLevelField];
-        BSONElement fieldMax = bucketControlMaxMap[topLevelField];
+        BSONElement fieldMin = fieldInfo.min;
+        BSONElement fieldMax = fieldInfo.max;
         std::pair<TypeTags, Value> controlMin = bson::convertFrom<true /*View*/>(fieldMin);
         std::pair<TypeTags, Value> controlMax = bson::convertFrom<true /*View*/>(fieldMax);
 

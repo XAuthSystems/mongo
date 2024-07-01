@@ -154,17 +154,16 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingTxnCloner::_targetAggregati
     AggregateCommandRequest request(NamespaceString::kSessionTransactionsTableNamespace,
                                     pipeline.serializeToBson());
 
-    request.setReadConcern(
-        BSON(repl::ReadConcernArgs::kLevelFieldName
-             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
-             << repl::ReadConcernArgs::kAtClusterTimeFieldName << _fetchTimestamp
-             << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
+    request.setReadConcern(repl::ReadConcernArgs::snapshot(LogicalTime(_fetchTimestamp), true));
     request.setWriteConcern(WriteConcernOptions());
     request.setHint(BSON(SessionTxnRecord::kSessionIdFieldName << 1));
     request.setUnwrappedReadPref(ReadPreferenceSetting{ReadPreference::Nearest}.toContainingBSON());
 
     return sharded_agg_helpers::runPipelineDirectlyOnSingleShard(
-        pipeline.getContext(), std::move(request), _sourceId.getShardId());
+        pipeline.getContext(),
+        std::move(request),
+        _sourceId.getShardId(),
+        false /* requestQueryStatsFromRemotes */);
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> ReshardingTxnCloner::_restartPipeline(
@@ -228,7 +227,8 @@ boost::optional<SharedSemiFuture<void>> ReshardingTxnCloner::doOneRecord(
                                                        TransactionParticipant::kDeadEndSentinel,
                                                        {kIncompleteHistoryStmtId},
                                                        boost::none /* preImageOpTime */,
-                                                       boost::none /* postImageOpTime */);
+                                                       boost::none /* postImageOpTime */,
+                                                       {});
         });
 }
 

@@ -1373,7 +1373,11 @@ of the merge sort algorithm, and streamed to their final destination.
 
 The maximum amount of memory allowed for an index build is controlled by the
 `maxIndexBuildMemoryUsageMegabytes` server parameter. The sorter is passed this value and uses it to
-regulate when to write a chunk of sorted data out to disk in a temporary file.
+regulate when to write a chunk of sorted data out to disk in a temporary file. The sorter keeps track
+of the chunks of data spilled to disk using one Iterator for each spill. The memory needed for the iterators
+is taken out of the `maxIndexBuildMemoryUsageMegabytes` and it is a percentage of `maxIndexBuildMemoryUsageMegabytes`
+define by the `maxIteratorsMemoryUsagePercentage` server parameter with minimum value enough to store one
+iterator and maximum value 1MB.
 
 _Code spelunking starting points:_
 
@@ -2597,3 +2601,7 @@ oplog.
 | 6.1.0                  | 11.0.1     | 5   |
 | 6.2.0                  | 11.2.0     | 5   |
 | 7.0.0                  | 11.2.0     | 5   |
+| 7.1.0                  | 11.2.0     | 5   |
+| 7.2.0                  | 11.3.0     | 5   |
+| 7.3.0                  | 11.3.0     | 5   |
+| 8.0.0                  | 11.3.0     | 5   |

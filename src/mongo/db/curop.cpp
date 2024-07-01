@@ -201,8 +201,7 @@ private:
         // wait time.
         if (_top) {
             auto locker = shard_role_details::getLocker(opCtx());
-            curOp->_lockStatsBase = locker->getLockerInfo(boost::none).stats;
-            curOp->_ticketWaitBase = locker->getTimeQueuedForTicketMicros();
+            curOp->_lockerStatsBase = CurOp::getAdditiveLockerStats(locker);
         }
 
         _top = curOp;
@@ -491,9 +490,10 @@ void CurOp::updateStatsOnTransactionUnstash() {
     // accrued outside of this CurOp instance so we will ignore/subtract them when reporting on this
     // operation.
     auto locker = shard_role_details::getLocker(opCtx());
-    _lockStatsBase = locker->getLockerInfo(boost::none).stats;
-    _ticketWaitBase = locker->getTimeQueuedForTicketMicros() +
-        Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
+    if (!_lockerStatsBase) {
+        _lockerStatsBase.emplace();
+    }
+    _lockerStatsBase->append(getAdditiveLockerStats(locker));
 }
 
 void CurOp::updateStatsOnTransactionStash() {
@@ -502,13 +502,10 @@ void CurOp::updateStatsOnTransactionStash() {
     // the snapshot of locker stats when it was unstashed. This stats delta on stashing is added
     // when reporting on this operation.
     auto locker = shard_role_details::getLocker(opCtx());
-
-    _lockStatsOnceStashed = locker->getLockerInfo(_lockStatsBase).stats;
-    _lockStatsBase = boost::none;
-
-    _ticketWaitWhenStashed = locker->getTimeQueuedForTicketMicros() +
-        Microseconds(locker->getFlowControlStats().timeAcquiringMicros) - _ticketWaitBase;
-    _ticketWaitBase = Microseconds(0);
+    if (!_lockerStatsBase) {
+        _lockerStatsBase.emplace();
+    }
+    _lockerStatsBase->subtract(getAdditiveLockerStats(locker));
 }
 
 void CurOp::setNS_inlock(NamespaceString nss) {
@@ -566,24 +563,20 @@ Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
 
 std::tuple<Milliseconds, Milliseconds> CurOp::_getAndSumBlockedTimeTotal() {
     auto locker = shard_role_details::getLocker(opCtx());
-    auto lockStats = locker->getLockerInfo(_lockStatsBase).stats;
+    auto cumulativeLockWaitTime = Microseconds(locker->stats().getCumulativeWaitTimeMicros());
+    auto timeQueuedForTickets = locker->getTimeQueuedForTicketMicros();
+    auto timeQueuedForFlowControl = Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
 
-    // The ticket wait time from the locker reports wait times from preceding operations in the
-    // CurOpStack. The precise time queued for tickets of a sub-operation is the ticket wait time
-    // from the locker minus the ticket wait time taken when this operation started.
-    auto waitForTicketDurationMillis = duration_cast<Milliseconds>(
-        locker->getTimeQueuedForTicketMicros() - _ticketWaitBase + _ticketWaitWhenStashed);
-    auto waitForTickets = waitForTicketDurationMillis +
-        duration_cast<Milliseconds>(
-                              Microseconds(locker->getFlowControlStats().timeAcquiringMicros));
+    if (_lockerStatsBase) {
+        cumulativeLockWaitTime -= _lockerStatsBase->cumulativeLockWaitTime;
+        timeQueuedForTickets -= _lockerStatsBase->timeQueuedForTickets;
+        timeQueuedForFlowControl -= _lockerStatsBase->timeQueuedForFlowControl;
+    }
 
-    if (_lockStatsOnceStashed)
-        lockStats.append(_lockStatsOnceStashed.get());
-
-    auto waitForLocks =
-        duration_cast<Milliseconds>(Microseconds(lockStats.getCumulativeWaitTimeMicros()));
-
-    return std::make_tuple(waitForTickets + waitForLocks, waitForTicketDurationMillis);
+    return std::make_pair(duration_cast<Milliseconds>(cumulativeLockWaitTime +
+                                                      timeQueuedForTickets +
+                                                      timeQueuedForFlowControl),
+                          duration_cast<Milliseconds>(timeQueuedForTickets));
 }
 
 void CurOp::enter_inlock(NamespaceString nss, int dbProfileLevel) {
@@ -629,8 +622,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
 
     // Obtain the total execution time of this operation.
     done();
-    _debug.additiveMetrics.executionTime =
-        duration_cast<Microseconds>(elapsedTimeExcludingPauses());
+    _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
     const auto executionTimeMillis =
         durationCount<Milliseconds>(*_debug.additiveMetrics.executionTime);
 
@@ -689,9 +681,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     }
 
     if (forceLog || shouldLogSlowOp) {
-        auto lockerInfo = shard_role_details::getLocker(opCtx)->getLockerInfo(_lockStatsBase);
-        if (_lockStatsOnceStashed)
-            lockerInfo.stats.append(_lockStatsOnceStashed.get());
+        auto locker = shard_role_details::getLocker(opCtx);
+        SingleThreadedLockStats lockStats(locker->stats());
 
         try {
             // Slow query logs are critical for observability and should not wait for ticket
@@ -723,7 +714,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         }();
 
         logv2::DynamicAttributes attr;
-        _debug.report(opCtx, &lockerInfo.stats, operationMetricsPtr, &attr);
+        _debug.report(opCtx, &lockStats, operationMetricsPtr, &attr);
 
         LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
@@ -1019,39 +1010,60 @@ void CurOp::reportState(BSONObjBuilder* builder,
                         durationCount<Milliseconds>(elapsedTimeTotal));
     }
 
-    // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
-    if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe()) {
-        boost::optional<std::tuple<std::string, Microseconds>> currentQueue;
-        BSONObjBuilder queuesBuilder(builder->subobjStart("queues"));
-        for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
-            AdmissionContext* admCtx = lookup(opCtx);
-            Microseconds totalTimeQueuedMicros = admCtx->totalTimeQueuedMicros();
+    boost::optional<std::tuple<std::string, Microseconds>> currentQueue;
+    BSONObjBuilder queuesBuilder(builder->subobjStart("queues"));
+    for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
+        AdmissionContext* admCtx = lookup(opCtx);
+        Microseconds totalTimeQueuedMicros = admCtx->totalTimeQueuedMicros();
 
-            if (auto startQueueingTime = admCtx->startQueueingTime()) {
-                Microseconds currentQueueTimeQueuedMicros = computeElapsedTimeTotal(
-                    *startQueueingTime, opCtx->getServiceContext()->getTickSource()->getTicks());
-                totalTimeQueuedMicros += currentQueueTimeQueuedMicros;
-                currentQueue = std::make_tuple(queueName, currentQueueTimeQueuedMicros);
-            }
-
-            BSONObjBuilder queueMetricsBuilder(queuesBuilder.subobjStart(queueName));
-            queueMetricsBuilder.append("admissions", admCtx->getAdmissions());
-            queueMetricsBuilder.append("totalTimeQueuedMicros",
-                                       durationCount<Microseconds>(totalTimeQueuedMicros));
-            queueMetricsBuilder.done();
+        if (auto startQueueingTime = admCtx->startQueueingTime()) {
+            Microseconds currentQueueTimeQueuedMicros = computeElapsedTimeTotal(
+                *startQueueingTime, opCtx->getServiceContext()->getTickSource()->getTicks());
+            totalTimeQueuedMicros += currentQueueTimeQueuedMicros;
+            currentQueue = std::make_tuple(queueName, currentQueueTimeQueuedMicros);
         }
-        queuesBuilder.done();
 
-        if (currentQueue) {
-            BSONObjBuilder currentQueueBuilder(builder->subobjStart("currentQueue"));
-            currentQueueBuilder.append("name", std::get<0>(*currentQueue));
-            currentQueueBuilder.append("timeQueuedMicros",
-                                       durationCount<Microseconds>(std::get<1>(*currentQueue)));
-            currentQueueBuilder.done();
-        } else {
-            builder->appendNull("currentQueue");
-        }
+        BSONObjBuilder queueMetricsBuilder(queuesBuilder.subobjStart(queueName));
+        queueMetricsBuilder.append("admissions", admCtx->getAdmissions());
+        queueMetricsBuilder.append("totalTimeQueuedMicros",
+                                   durationCount<Microseconds>(totalTimeQueuedMicros));
+        queueMetricsBuilder.done();
     }
+    queuesBuilder.done();
+
+    if (currentQueue) {
+        BSONObjBuilder currentQueueBuilder(builder->subobjStart("currentQueue"));
+        currentQueueBuilder.append("name", std::get<0>(*currentQueue));
+        currentQueueBuilder.append("timeQueuedMicros",
+                                   durationCount<Microseconds>(std::get<1>(*currentQueue)));
+        currentQueueBuilder.done();
+    } else {
+        builder->appendNull("currentQueue");
+    }
+}
+
+CurOp::AdditiveLockerStats CurOp::getAdditiveLockerStats(const Locker* locker) {
+    CurOp::AdditiveLockerStats stats;
+    stats.lockStats = locker->stats();
+    stats.cumulativeLockWaitTime = Microseconds(stats.lockStats.getCumulativeWaitTimeMicros());
+    stats.timeQueuedForTickets = locker->getTimeQueuedForTicketMicros();
+    stats.timeQueuedForFlowControl =
+        Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
+    return stats;
+}
+
+void CurOp::AdditiveLockerStats::append(const CurOp::AdditiveLockerStats& other) {
+    lockStats.append(other.lockStats);
+    cumulativeLockWaitTime += other.cumulativeLockWaitTime;
+    timeQueuedForTickets += other.timeQueuedForTickets;
+    timeQueuedForFlowControl += other.timeQueuedForFlowControl;
+}
+
+void CurOp::AdditiveLockerStats::subtract(const CurOp::AdditiveLockerStats& other) {
+    lockStats.subtract(other.lockStats);
+    cumulativeLockWaitTime -= other.cumulativeLockWaitTime;
+    timeQueuedForTickets -= other.timeQueuedForTickets;
+    timeQueuedForFlowControl -= other.timeQueuedForFlowControl;
 }
 
 namespace {
@@ -1368,20 +1380,17 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("remoteOpWaitMillis", durationCount<Milliseconds>(*remoteOpWaitTime));
     }
 
-    // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
-    if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe()) {
-        BSONObjBuilder queuesBuilder;
-        for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
-            AdmissionContext* admCtx = lookup(opCtx);
-            BSONObjBuilder bb;
-            bb.append("admissions", admCtx->getAdmissions());
-            bb.append("totalTimeQueuedMicros",
-                      durationCount<Microseconds>(admCtx->totalTimeQueuedMicros()));
-            queuesBuilder.append(queueName, bb.obj());
-        }
-
-        pAttrs->add("queues", queuesBuilder.obj());
+    BSONObjBuilder queuesBuilder;
+    for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
+        AdmissionContext* admCtx = lookup(opCtx);
+        BSONObjBuilder bb;
+        bb.append("admissions", admCtx->getAdmissions());
+        bb.append("totalTimeQueuedMicros",
+                  durationCount<Microseconds>(admCtx->totalTimeQueuedMicros()));
+        queuesBuilder.append(queueName, bb.obj());
     }
+
+    pAttrs->add("queues", queuesBuilder.obj());
 
     if (gFeatureFlagLogSlowOpsBasedOnTimeWorking.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -1824,7 +1833,6 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     addIfNeeded("locks", [](auto field, auto args, auto& b) {
         auto lockerInfo =
             shard_role_details::getLocker(args.opCtx)->getLockerInfo(args.curop.getLockStatsBase());
-        // TODO SERVER-88195: Account for _lockStatsOnceStashed
         BSONObjBuilder locks(b.subobjStart(field));
         lockerInfo.stats.report(&locks);
     });

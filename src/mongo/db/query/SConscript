@@ -228,6 +228,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/server_base",
+        "$BUILD_DIR/mongo/db/service_context",
         "$BUILD_DIR/mongo/transport/transport_layer_common",
     ],
 )
@@ -288,7 +289,6 @@ env.Library(
         "find_command.idl",
         "getmore_command.idl",
         "query_request_helper.cpp",
-        "max_time_ms_parser.cpp",
         "tailable_mode.cpp",
         "tailable_mode.idl",
     ],
@@ -487,7 +487,6 @@ env.CppUnitTest(
         "killcursors_request_test.cpp",
         "lru_key_value_test.cpp",
         "map_reduce_output_format_test.cpp",
-        "max_time_ms_parser_test.cpp",
         "plan_cache_indexability_test.cpp",
         "plan_cache_key_info_test.cpp",
         "plan_cache_test.cpp",
@@ -538,6 +537,7 @@ env.CppUnitTest(
         "sbe_stage_builder_window_function_test.cpp",
         "shard_filterer_factory_mock.cpp",
         "sort_pattern_test.cpp",
+        "util/cartesian_product_test.cpp",
         "util/deferred_test.cpp",
         "util/hash_roaring_set_test.cpp",
         "util/memory_util_test.cpp",

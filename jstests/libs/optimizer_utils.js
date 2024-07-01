@@ -53,7 +53,7 @@ export function usedBonsaiOptimizer(explain) {
                 return false;
             }
         }
-        return true
+        return true;
     }
 
     // This section handles the explain output for unsharded queries.
@@ -96,6 +96,17 @@ export function extractLogicalCEFromNode(node) {
     const ce = node.properties.logicalProperties.cardinalityEstimate[0].ce;
     assert.neq(ce, null, tojson(node));
     return ce;
+}
+
+/**
+ * Parameter 'internalPipelineLengthLimit' depends on the platform and the build type.
+ */
+export function getExpectedPipelineLimit(database) {
+    const buildInfo = assert.commandWorked(database.adminCommand("buildInfo"));
+    const isDebug = buildInfo.debug;
+    const isS390X =
+        "buildEnvironment" in buildInfo ? buildInfo.buildEnvironment.distarch == "s390x" : false;
+    return isDebug ? 200 : (isS390X ? 700 : 1000);
 }
 
 /**

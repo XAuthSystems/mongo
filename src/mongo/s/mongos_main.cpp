@@ -127,7 +127,7 @@
 #include "mongo/s/read_write_concern_defaults_cache_lookup_mongos.h"
 #include "mongo/s/resource_yielders.h"
 #include "mongo/s/router_uptime_reporter.h"
-#include "mongo/s/service_entry_point_mongos.h"
+#include "mongo/s/service_entry_point_router_role.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/sessions_collection_sharded.h"
 #include "mongo/s/sharding_initialization.h"
@@ -409,6 +409,8 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
                                                       &shutdownTimeElapsedBuilder);
             mongosTopCoord->enterQuiesceModeAndWait(opCtx, quiesceTime);
         }
+
+        UserCacheInvalidator::stop(serviceContext);
 
         // Inform the TransportLayers to stop accepting new connections.
         if (auto tlm = serviceContext->getTransportLayerManager()) {
@@ -797,7 +799,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 #endif
 
     serviceContext->getService(ClusterRole::RouterServer)
-        ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
+        ->setServiceEntryPoint(std::make_unique<ServiceEntryPointRouterRole>());
 
     {
         const auto loadBalancerPort = load_balancer_support::getLoadBalancerPort();

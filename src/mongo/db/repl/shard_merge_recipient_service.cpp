@@ -727,7 +727,7 @@ OpTime ShardMergeRecipientService::Instance::_getDonorMajorityOpTime(
     FindCommandRequest findCmd{NamespaceString::kRsOplogNamespace};
     findCmd.setSort(BSON("$natural" << -1));
     findCmd.setProjection(oplogOpTimeFields);
-    findCmd.setReadConcern(ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    findCmd.setReadConcern(ReadConcernArgs::kMajority);
     auto majorityOpTimeBson = client->findOne(
         std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     uassert(7339780, "Found no entries in the remote oplog", !majorityOpTimeBson.isEmpty());
@@ -1031,7 +1031,7 @@ SemiFuture<void> ShardMergeRecipientService::Instance::_openBackupCursor(
             {BSON("$backupCursor" << BSONObj())});
         // We must set a writeConcern on internal commands.
         aggRequest.setWriteConcern(WriteConcernOptions());
-        return aggRequest.toBSON(BSONObj());
+        return aggRequest.toBSON();
     }();
 
     stdx::lock_guard lk(_mutex);
@@ -1265,11 +1265,7 @@ boost::optional<OpTime> ShardMergeRecipientService::Instance::_getOldestActiveTr
     // config.transactions collection aren't coalesced for multi-statement transactions during
     // secondary oplog application, unlike the retryable writes where updates to config.transactions
     // collection are coalesced on secondaries.
-    findCmd.setReadConcern(
-        BSON(repl::ReadConcernArgs::kLevelFieldName
-             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
-             << repl::ReadConcernArgs::kAtClusterTimeFieldName << ReadTimestamp
-             << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
+    findCmd.setReadConcern(ReadConcernArgs::snapshot(LogicalTime(ReadTimestamp), true));
 
     auto earliestOpenTransactionBson = _client->findOne(std::move(findCmd), _readPreference);
     LOGV2_DEBUG(7339736,
@@ -1485,8 +1481,7 @@ ShardMergeRecipientService::Instance::_openCommittedTransactionsFindCursor() {
                                       << "committed"
                                       << "lastWriteOpTime.ts"
                                       << BSON("$lte" << startApplyingDonorTimestamp)));
-    findCommandRequest.setReadConcern(
-        ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    findCommandRequest.setReadConcern(ReadConcernArgs::kMajority);
     findCommandRequest.setHint(BSON("$natural" << 1));
 
     return _client->find(std::move(findCommandRequest), _readPreference, ExhaustMode::kOn);
@@ -1579,9 +1574,7 @@ ShardMergeRecipientService::Instance::_fetchRetryableWritesOplogBeforeStartOpTim
     // that majority commit point. So we need to do a local read to fetch the retryable writes
     // so that we don't miss the config.transactions record and later do a majority read on the
     // donor's last applied operationTime to make sure the fetched results are majority committed.
-    auto readConcernArgs = repl::ReadConcernArgs(
-        boost::optional<repl::ReadConcernLevel>(repl::ReadConcernLevel::kLocalReadConcern));
-    aggRequest.setReadConcern(readConcernArgs.toBSONInner());
+    aggRequest.setReadConcern(ReadConcernArgs::kLocal);
     // We must set a writeConcern on internal commands.
     aggRequest.setWriteConcern(WriteConcernOptions());
     // Allow aggregation to write to temporary files in case it reaches memory restriction.
@@ -1605,18 +1598,21 @@ ShardMergeRecipientService::Instance::_fetchRetryableWritesOplogBeforeStartOpTim
         // the bytes of the documents read off the network.
         std::vector<BSONObj> retryableWritesEntries;
         retryableWritesEntries.reserve(cursor->objsLeftInBatch());
-        auto toApplyDocumentBytes = 0;
+        std::size_t toApplyDocumentBytes = 0;
+        std::size_t toApplyDocumentCount = 0;
 
         while (cursor->moreInCurrentBatch()) {
             // Gather entries from current batch.
             BSONObj doc = cursor->next();
             toApplyDocumentBytes += doc.objsize();
+            toApplyDocumentCount++;
             retryableWritesEntries.push_back(doc);
         }
 
         if (retryableWritesEntries.size() != 0) {
             // Wait for enough space.
-            _donorOplogBuffer->waitForSpace(opCtx.get(), toApplyDocumentBytes);
+            _donorOplogBuffer->waitForSpace(
+                opCtx.get(), toApplyDocumentBytes, toApplyDocumentCount);
             // Buffer retryable writes entries.
             _donorOplogBuffer->preload(
                 opCtx.get(), retryableWritesEntries.begin(), retryableWritesEntries.end());
@@ -2132,7 +2128,7 @@ void ShardMergeRecipientService::Instance::_assertIfMigrationIsSafeToRunWithCurr
 
     FindCommandRequest findCmd{NamespaceString::kServerConfigurationNamespace};
     findCmd.setFilter(BSON("_id" << multiversion::kParameterName));
-    findCmd.setReadConcern(ReadConcernArgs(ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+    findCmd.setReadConcern(ReadConcernArgs::kMajority);
     auto donorFCVbson = _client->findOne(std::move(findCmd),
                                          ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
 

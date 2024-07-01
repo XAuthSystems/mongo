@@ -35,6 +35,7 @@
 #include "mongo/db/list_collections_gen.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/config/initial_split_policy.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/vector_clock_mutable.h"
@@ -87,12 +88,11 @@ void convertToCappedOnShard(OperationContext* opCtx,
     request.setSize(size);
     request.setTargetUUID(targetUUID);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, osi);
+    generic_argument_util::setMajorityWriteConcern(request);
+    generic_argument_util::setOperationSessionInfo(request, osi);
 
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrConvertToCappedParticipant>>(
-        **executor, token, request, args);
+        **executor, token, request);
     sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {shardId});
 }
 
@@ -413,24 +413,12 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
 
-                {
-                    const auto preImageColl = acquireCollection(
-                        opCtx,
-                        CollectionAcquisitionRequest(nss(),
-                                                     AcquisitionPrerequisites::kPretendUnsharded,
-                                                     repl::ReadConcernArgs::get(opCtx),
-                                                     AcquisitionPrerequisites::kRead),
-                        MODE_IS);
-
-                    CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx,
-                                                                                         nss())
-                        ->clearFilteringMetadata(opCtx);
-                }
                 ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
                     opCtx,
                     nss(),
                     _critSecReason,
                     ShardingCatalogClient::kMajorityWriteConcern,
+                    ShardingRecoveryService::FilteringMetadataClearer(),
                     true /* throwIfReasonDiffers */);
             }))
         .onError([this, executor = executor, anchor = shared_from_this()](const Status& status) {
@@ -516,6 +504,7 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_cleanupOnAbort(
                     nss(),
                     _critSecReason,
                     ShardingCatalogClient::kMajorityWriteConcern,
+                    ShardingRecoveryService::NoCustomAction(),
                     false /* throwIfReasonDiffers */);
             }
         });
@@ -530,11 +519,11 @@ void ConvertToCappedCoordinator::_enterCriticalSectionOnDataShard(
     blockCRUDOperationsRequest.setBlockType(blockType);
     blockCRUDOperationsRequest.setReason(_critSecReason);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest, args);
+        **executor, token, blockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {*_doc.getDataShard()});
 }
 
@@ -547,11 +536,11 @@ void ConvertToCappedCoordinator::_exitCriticalSectionOnDataShard(
     unblockCRUDOperationsRequest.setReason(_critSecReason);
     unblockCRUDOperationsRequest.setClearFilteringMetadata(true);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest, args);
+        **executor, token, unblockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {*_doc.getDataShard()});
 }
 

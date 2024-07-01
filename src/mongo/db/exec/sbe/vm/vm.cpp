@@ -197,6 +197,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isMinKey
     0,  // isMaxKey
     0,  // isTimestamp
+    0,  // isKeyString
     0,  // typeMatchImm
 
     0,  // function is special, the stack offset is encoded in the instruction itself
@@ -223,8 +224,13 @@ void ByteCode::allocStackImpl(size_t newSizeDelta) noexcept {
     auto oldSize = _argStackEnd - _argStack;
     auto oldTop = _argStackTop - _argStack;
 
-    _argStack = reinterpret_cast<uint8_t*>(mongoRealloc(_argStack, oldSize + newSizeDelta));
-    _argStackEnd = _argStack + oldSize + newSizeDelta;
+    auto newSize = oldSize + newSizeDelta;
+    uint8_t* newArgStack = static_cast<uint8_t*>(::operator new(newSize));
+    memcpy(newArgStack, _argStack, oldSize);
+    ::operator delete(_argStack, oldSize);
+
+    _argStack = newArgStack;
+    _argStackEnd = _argStack + newSize;
     _argStackTop = _argStack + oldTop;
 }
 
@@ -899,6 +905,10 @@ void CodeFragment::appendIsMaxKey(Instruction::Parameter input) {
 
 void CodeFragment::appendIsTimestamp(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isTimestamp, input);
+}
+
+void CodeFragment::appendIsKeyString(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isKeyString, input);
 }
 
 void CodeFragment::appendTraverseP() {
@@ -5605,14 +5615,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(
     int numInputFields = hasInputFields && spec->numInputFields ? *spec->numInputFields : 0;
     const int fieldsStackOff = 3;
     const int argsStackOff = fieldsStackOff + numInputFields;
-    const auto stackOffsets = MakeObjStackOffsets{fieldsStackOff, argsStackOff};
+    const auto ctx = ProduceObjContext{fieldsStackOff, argsStackOff, code};
 
     UniqueBSONObjBuilder bob;
 
     if (!hasInputFields) {
-        produceBsonObject(spec, stackOffsets, code, bob, objTag, objVal);
+        produceBsonObject(ctx, spec, bob, objTag, objVal);
     } else {
-        produceBsonObjectWithInputFields(spec, stackOffsets, code, bob, objTag, objVal);
+        produceBsonObjectWithInputFields(ctx, spec, bob, objTag, objVal);
     }
 
     bob.doneFast();
@@ -7211,6 +7221,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRankFinalize(
     auto [stateOwned, stateTag, stateVal] = getFromStack(0);
     auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec] =
         rankState(stateTag, stateVal);
+    if (static_cast<int32_t>(lastRank) == lastRank) {
+        return {true, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(lastRank)};
+    }
     return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(lastRank)};
 }
 
@@ -11492,6 +11505,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
             case Instruction::isTimestamp: {
                 runTagCheck(pcPointer, value::TypeTags::Timestamp);
+                break;
+            }
+            case Instruction::isKeyString: {
+                runTagCheck(pcPointer, value::TypeTags::keyString);
                 break;
             }
             case Instruction::typeMatchImm: {

@@ -309,7 +309,6 @@ public:
             participantRequest.setPrimaryShardId(ShardingState::get(opCtx)->shardId());
             participantRequest.setCursor(request().getCursor());
             const auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-
             BSONObjBuilder participantRequestBob;
             participantRequest.serialize(&participantRequestBob);
             appendOpKey(shardOpKey, &participantRequestBob);
@@ -373,7 +372,7 @@ public:
                 if (cursorOpts && cursorOpts->getBatchSize()) {
                     return *cursorOpts->getBatchSize();
                 } else {
-                    return query_request_helper::kDefaultBatchSize;
+                    return query_request_helper::getDefaultBatchSize();
                 }
             }();
 

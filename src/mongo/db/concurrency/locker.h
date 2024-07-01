@@ -100,6 +100,15 @@ public:
     void setDebugInfo(std::string info);
 
     /**
+     * Returns the cumulative lock stats accrued so far. The returned stats are not a snapshot
+     * but a reference to AtomicLockStats, meaning that they can change at any time after they are
+     * returned.
+     */
+    const AtomicLockStats& stats() const {
+        return _stats;
+    }
+
+    /**
      * State for reporting the number of active and queued reader and writer clients.
      */
     enum ClientState { kInactive, kActiveReader, kActiveWriter, kQueuedReader, kQueuedWriter };
@@ -516,7 +525,7 @@ public:
     /**
      * Returns a vector with the lock information from the given resource lock holders.
      */
-    std::vector<LogDegugInfo> getLockInfoFromResourceHolders(ResourceId resId) const;
+    std::vector<LogDebugInfo> getLockInfoFromResourceHolders(ResourceId resId) const;
 
     void dump() const;
 

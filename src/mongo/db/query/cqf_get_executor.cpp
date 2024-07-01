@@ -137,7 +137,6 @@ using ce::HeuristicEstimator;
 using ce::HistogramEstimator;
 using ce::SamplingEstimator;
 using cost_model::CostEstimatorImpl;
-using cost_model::CostModelManager;
 
 static std::pair<IndexDefinitions, MultikeynessTrie> buildIndexSpecsOptimizer(
     boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -740,9 +739,6 @@ void validateFindCommandOptions(const FindCommandRequest& req) {
     uassert(ErrorCodes::InternalErrorNotSupported,
             "allowPartialResults unsupported in CQF",
             !req.getAllowPartialResults());
-    uassert(ErrorCodes::InternalErrorNotSupported,
-            "allowSpeculativeMajorityRead unsupported in CQF",
-            !req.getAllowSpeculativeMajorityRead());
     uassert(
         ErrorCodes::InternalErrorNotSupported, "awaitData unsupported in CQF", !req.getAwaitData());
     uassert(ErrorCodes::InternalErrorNotSupported,

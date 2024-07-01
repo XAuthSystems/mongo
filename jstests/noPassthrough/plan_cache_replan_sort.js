@@ -7,7 +7,7 @@
  */
 import {getCachedPlan} from "jstests/libs/analyze_plan.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
-import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
+import {checkSbeFullFeatureFlagEnabled} from "jstests/libs/sbe_util.js";
 
 const conn = MongoRunner.runMongod({setParameter: {allowDiskUseByDefault: false}});
 const db = conn.getDB("test");
@@ -26,9 +26,13 @@ assert.commandWorked(coll.insert({x: 5, y: 1}));
 // Set the memory limit to be large enough to sort a single document in the collection.
 const documentBsonSize = Object.bsonsize(docs[0]);
 const sizeMultiplier = 5.0;
+// 10% of the memory, with minimum kFileIteratorSize (~140B) and maximum 1 MB, is reserved to store
+// the file iterators used by external sort in case of spilling.
+const fileIteratorMinimumMemory = 140;
 assert.commandWorked(db.adminCommand({
     setParameter: 1,
-    internalQueryMaxBlockingSortMemoryUsageBytes: documentBsonSize * sizeMultiplier
+    internalQueryMaxBlockingSortMemoryUsageBytes:
+        documentBsonSize * sizeMultiplier + fileIteratorMinimumMemory
 }));
 
 // { x: 5 } should match a single document and sort it, which should be within the sort memory
@@ -42,7 +46,7 @@ assert.eq(1, cachedPlans.length, cachedPlans);
 assert.eq(true, cachedPlans[0].isActive, cachedPlans);
 const cachedPlan = getCachedPlan(cachedPlans[0].cachedPlan);
 const cachedPlanVersion = cachedPlans[0].version;
-if (checkSbeFullyEnabled(db)) {
+if (checkSbeFullFeatureFlagEnabled(db)) {
     // If the SBE plan cache is on, then the cached plan has a different format.
     assert.eq(cachedPlanVersion, "2", cachedPlans);
     assert(cachedPlan.stages.includes("sort"), cachedPlans);
@@ -62,7 +66,8 @@ assert.eq(profileObj.replanned, true, profileObj);
 assert.eq(
     profileObj.replanReason,
     `cached plan returned: QueryExceededMemoryLimitNoDiskUseAllowed: Sort exceeded memory limit of ${
-        documentBsonSize * sizeMultiplier} bytes, but did not opt in to external sorting.`,
+        documentBsonSize * sizeMultiplier +
+        fileIteratorMinimumMemory} bytes, but did not opt in to external sorting.`,
     profileObj);
 
 MongoRunner.stopMongod(conn);

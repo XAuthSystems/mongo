@@ -2526,15 +2526,26 @@ intrusive_ptr<Expression> ExpressionFieldPath::optimize() {
         return ExpressionConstant::create(getExpressionContext(), Value());
     }
 
-    if (_variable == Variables::kNowId || _variable == Variables::kClusterTimeId ||
-        _variable == Variables::kUserRolesId) {
-        // The agg system is allowed to replace the ExpressionFieldPath with an ExpressionConstant,
-        // which in turn would result in a plan cache entry that inlines the value of a system
-        // variable. However, the values of these system variables are not guaranteed to be constant
-        // across different executions of the same query shape, so we prohibit the optimization.
+    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    if (sbeFullEnabled &&
+        (_variable == Variables::kNowId || _variable == Variables::kClusterTimeId ||
+         _variable == Variables::kUserRolesId)) {
+        // Normally, we should be able to constant fold ExpressionFieldPath representing a system
+        // variable into an ExpressionConstant during expression optimization. However, this causes
+        // a problem with the current implementation of the SBE plan cache as it would effectively
+        // embed a value for the system variable into the plan in the cache. This constant folding
+        // optimization is important for queries which want to use an index scan and contain a
+        // predicate referencing a system variable, for example:
+        // {a: {$expr: {$lt: ["$foo", {$subtract: ["$$NOW", 10]}]}}})
+        // Saving such a plan with the constant folded expression in the plan is wrong because a
+        // cache hit will reuse the plan with the wrong constant, resulting in incorrect query
+        // results. To avoid this problem, when featureFlagSbeFull is enabled (the SBE plan cache is
+        // enabled), prohibit this optimization.
         return intrusive_ptr<Expression>(this);
     }
 
+    // We allow system variables to be constant folded when the SBE plan cache is not enabled.
     if (getExpressionContext()->variables.hasConstantValue(_variable)) {
         return ExpressionConstant::create(
             getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
@@ -3879,7 +3890,7 @@ Value ExpressionLn::evaluateNumericArg(const Value& numericArg) const {
     if (numericArg.getType() == NumberDecimal) {
         Decimal128 argDecimal = numericArg.getDecimal();
         if (argDecimal.isGreater(Decimal128::kNormalizedZero))
-            return Value(argDecimal.logarithm());
+            return Value(argDecimal.naturalLogarithm());
         // Fall through for error case.
     }
     double argDouble = numericArg.coerceToDouble();
@@ -8315,15 +8326,6 @@ intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const exp
             str::stream() << kExpressionName << " requires 'input' to be specified",
             inputExpr);
 
-    if (auto constFieldExpr = dynamic_cast<ExpressionConstant*>(fieldExpr.get()); constFieldExpr) {
-        uassert(5654602,
-                str::stream() << kExpressionName
-                              << " requires 'field' to evaluate to type String, "
-                                 "but got "
-                              << typeName(constFieldExpr->getValue().getType()),
-                constFieldExpr->getValue().getType() == BSONType::String);
-    }
-
     return make_intrusive<ExpressionGetField>(expCtx, fieldExpr, inputExpr);
 }
 
@@ -8360,7 +8362,7 @@ Value ExpressionGetField::serialize(const SerializationOptions& options) const {
     Value fieldValue;
 
     if (auto fieldExprConst = dynamic_cast<ExpressionConstant*>(_children[_kField].get());
-        fieldExprConst) {
+        fieldExprConst && fieldExprConst->getValue().getType() == BSONType::String) {
         auto strPath = fieldExprConst->getValue().getString();
 
         Value maybeRedactedPath{options.serializeFieldPathFromString(strPath)};

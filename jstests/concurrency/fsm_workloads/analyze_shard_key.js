@@ -9,9 +9,6 @@
  *  uses_transactions,
  *  resource_intensive,
  *  incompatible_with_concurrency_simultaneous,
- *  # TODO SERVER-89503 Re-enable this test in suites with balancer once
- *  # the relative issue is solved.
- *  assumes_balancer_off,
  * ]
  */
 import {interruptedQueryErrors} from "jstests/concurrency/fsm_libs/assert.js";
@@ -487,14 +484,29 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         }
 
         // Validate the frequency metrics. Likewise, due to the concurrent writes by other threads,
-        // it is not feasible to assert on the exact "mostCommonValues".
-        assert.eq(metrics.mostCommonValues.length, this.analyzeShardKeyNumMostCommonValues);
+        // it is not feasible to assert on the exact "mostCommonValues". Also, if the shard key is
+        // unique and the suite performs unclean shutdown, then the length of "mostCommonValues" may
+        // be less than analyzeShardKeyNumMostCommonValues since unclean shutdown can cause
+        // $collStats to return wrong number of documents and the calculation of the cardinality and
+        // frequency metrics for a unique shard key depends on the metrics returned by $collStats.
+        const shouldCheckMostCommonValues = !(this.shardKeyOptions.isUnique && TestData.killShards);
+        if (shouldCheckMostCommonValues) {
+            assert.eq(metrics.mostCommonValues.length, this.analyzeShardKeyNumMostCommonValues);
+        }
 
-        // Validate the monotonicity metrics. This check is skipped if the balancer is enabled
-        // since chunk migration deletes documents from the donor shard and re-inserts them on the
-        // recipient shard so there is no guarantee that the insertion order from the client is
-        // preserved.
-        if (!isSampling && !TestData.runningWithBalancer) {
+        // Validate the monotonicity metrics. This check is skipped if:
+        // - The analyzeShardKey command is run with a custom 'sampleRate' or 'sampleSize' since
+        //   the number of sampled documents may be so low that the resulting correlation
+        //   coefficient is very different from the actual correlation coefficient.
+        // - The balancer is enabled since chunk migration deletes documents from the donor shard
+        //   and re-inserts them on the recipient shard so there is no guarantee that the original
+        //   insertion order is preserved.
+        // - There is a lot of shard key updates since they overwrite the recordId order in the
+        //   the shard key index.
+        const shouldCheckMonotonicity = !isSampling && !TestData.runningWithBalancer &&
+            (this.writeDistribution.percentageOfShardKeyUpdates <=
+             this.percentageOfShardKeyUpdatesThresholdForMonotonicityCheck);
+        if (shouldCheckMonotonicity) {
             assert.eq(metrics.monotonicity.type,
                       this.shardKeyOptions.isMonotonic && !this.shardKeyOptions.isHashed
                           ? "monotonic"
@@ -519,6 +531,11 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
 
     // The number of sampled queries returned by the latest analyzeShardKey command.
     $config.data.previousNumSampledQueries = 0;
+
+    // The maximum percentage of shard key updates to still do the monotonicity check. Shard key
+    // updates overwrite recordId order in the shard key index so if the accuracy of the
+    // monotonicity check decreases as the number of shard key updates increases.
+    $config.data.percentageOfShardKeyUpdatesThresholdForMonotonicityCheck = 20;
 
     $config.data.isAcceptableSampleSize = function isAcceptableSampleSize(
         part, whole, expectedPercentage) {
@@ -699,6 +716,14 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                   `collection is empty. ${tojsononeline(err)}`);
             // Inaccurate fast count is only expected when there is unclean shutdown.
             return TestData.runningWithShardStepdowns;
+        }
+        // TODO SERVER-91030: Remove special handling of error code 7826507.
+        if (err.code == 7826507) {
+            print(
+                `Failed to analyze the shard key because the number of sampled documents is zero. ${
+                    tojsononeline(err)}`);
+            // This may be due to chunk migrations.
+            return true;
         }
         if (err.code == ErrorCodes.IllegalOperation && err.errmsg &&
             err.errmsg.includes("monotonicity") && err.errmsg.includes("empty collection")) {
@@ -962,11 +987,10 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
             configureFailPoint(adminDb, "queryAnalysisSamplerFilterByComment", {}, "off");
         });
 
-        const res = assert.commandWorked(db.runCommand(
-            {find: this.metricsCollName, filter: {_id: new UUID(this.metricsDocIdString)}}));
-        assert.eq(res.cursor.id, 0, res);
-        assert.eq(res.cursor.firstBatch.length, 1, res);
-        const metrics = res.cursor.firstBatch[0].metrics;
+        const res =
+            db[this.metricsCollName].find({_id: new UUID(this.metricsDocIdString)}).toArray();
+        assert.eq(res.length, 1, res);
+        const metrics = res[0].metrics;
         print("Doing final validation of read and write distribution metrics " +
               tojson(this.truncateAnalyzeShardKeyResponseForLogging(metrics)));
         this.assertReadWriteDistributionMetrics(metrics, true /* isFinal */);

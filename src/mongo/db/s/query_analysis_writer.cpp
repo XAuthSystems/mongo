@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/ops/write_ops_gen.h"
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
@@ -171,12 +172,15 @@ SampledCommandRequest makeSampledUpdateCommandRequest(
 
     write_ops::UpdateCommandRequest sampledCmd(originalCmd.getNamespace(), {std::move(op)});
     sampledCmd.setLet(originalCmd.getLet());
+    sampledCmd.setBypassEmptyTsReplacement(originalCmd.getBypassEmptyTsReplacement());
 
-    return {sampleId,
-            sampledCmd.getNamespace(),
-            sampledCmd.toBSON(
-                BSON("$db" << DatabaseNameUtil::serialize(sampledCmd.getNamespace().dbName(),
-                                                          sampledCmd.getSerializationContext())))};
+    // "$db" is only included when serializing to OP_MSG, so we manually append it here.
+    BSONObjBuilder bob(sampledCmd.toBSON());
+    bob.append("$db",
+               DatabaseNameUtil::serialize(sampledCmd.getNamespace().dbName(),
+                                           SerializationContext::stateCommandRequest()));
+
+    return {sampleId, sampledCmd.getNamespace(), bob.obj()};
 }
 
 /*
@@ -212,11 +216,14 @@ SampledCommandRequest makeSampledDeleteCommandRequest(
 
     write_ops::DeleteCommandRequest sampledCmd(originalCmd.getNamespace(), {std::move(op)});
     sampledCmd.setLet(originalCmd.getLet());
+    sampledCmd.setBypassEmptyTsReplacement(originalCmd.getBypassEmptyTsReplacement());
 
-    return {
-        sampleId,
-        sampledCmd.getNamespace(),
-        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
+    // "$db" is only included when serializing to OP_MSG, so we manually append it here.
+    BSONObjBuilder bob(sampledCmd.toBSON());
+    bob.append("$db",
+               DatabaseNameUtil::serialize(sampledCmd.getNamespace().dbName(),
+                                           SerializationContext::stateCommandRequest()));
+    return {sampleId, sampledCmd.getNamespace(), bob.obj()};
 }
 
 /*
@@ -255,11 +262,12 @@ SampledCommandRequest makeSampledFindAndModifyCommandRequest(
     sampledCmd.setSort(originalCmd.getSort());
     sampledCmd.setArrayFilters(originalCmd.getArrayFilters());
     sampledCmd.setLet(originalCmd.getLet());
+    sampledCmd.setBypassEmptyTsReplacement(originalCmd.getBypassEmptyTsReplacement());
 
-    return {
-        sampleId,
-        sampledCmd.getNamespace(),
-        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
+    // "$db" is only included when serializing to OP_MSG, so we manually append it here.
+    BSONObjBuilder bob(sampledCmd.toBSON());
+    bob.append("$db", sampledCmd.getNamespace().db_forSharding());
+    return {sampleId, sampledCmd.getNamespace(), bob.obj()};
 }
 
 /*

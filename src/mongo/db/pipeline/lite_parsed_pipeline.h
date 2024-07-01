@@ -149,6 +149,16 @@ public:
     }
 
     /**
+     * Returns true if the pipeline contains at least one stage that requires the aggregation
+     * command to be exempt from ingress admission control.
+     */
+    bool isExemptFromIngressAdmissionControl() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return spec->isExemptFromIngressAdmissionControl();
+        });
+    }
+
+    /**
      * Returns true if any of the stages in this pipeline require knowledge of the collection
      * default collation to be successfully parsed, false otherwise. Note that this only applies
      * to top level stages and does not account for subpipelines.
@@ -179,10 +189,10 @@ public:
     /**
      * Verifies that this pipeline is allowed to run with the specified read concern level.
      */
-    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
-                                                 bool isImplicitDefault,
-                                                 boost::optional<ExplainOptions::Verbosity> explain,
-                                                 bool enableMajorityReadConcern) const;
+    ReadConcernSupportResult supportsReadConcern(
+        repl::ReadConcernLevel level,
+        bool isImplicitDefault,
+        boost::optional<ExplainOptions::Verbosity> explain) const;
 
     /**
      * Checks that all of the stages in this pipeline are allowed to run with the specified read
@@ -215,8 +225,7 @@ public:
      */
     void verifyIsSupported(OperationContext* opCtx,
                            std::function<bool(OperationContext*, const NamespaceString&)> isSharded,
-                           boost::optional<ExplainOptions::Verbosity> explain,
-                           bool enableMajorityReadConcern) const;
+                           boost::optional<ExplainOptions::Verbosity> explain) const;
 
     /**
      * Returns true if the first stage in the pipeline does not require an input source.

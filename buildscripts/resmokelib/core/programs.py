@@ -278,7 +278,6 @@ def mongo_shell_program(
 
     shortcut_opts = {
         "backupOnRestartDir": (config.BACKUP_ON_RESTART_DIR, None),
-        "enableMajorityReadConcern": (config.MAJORITY_READ_CONCERN, True),
         "mixedBinVersions": (config.MIXED_BIN_VERSIONS, ""),
         "multiversionBinVersion": (shell_mixed_version, ""),
         "storageEngine": (config.STORAGE_ENGINE, ""),
@@ -406,6 +405,9 @@ def mongo_shell_program(
     if "nodb" in kwargs and connection_string is not None:
         test_data["connectionString"] = connection_string
         connection_string = None
+
+    if config.FUZZ_MONGOD_CONFIGS is not None and config.FUZZ_MONGOD_CONFIGS is not False:
+        test_data["fuzzMongodConfigs"] = True
 
     for var_name in global_vars:
         _format_shell_vars(eval_sb, [var_name], global_vars[var_name])
@@ -538,7 +540,6 @@ def dbtest_program(
     if suites is not None:
         args.extend(suites)
 
-    kwargs["enableMajorityReadConcern"] = config.MAJORITY_READ_CONCERN
     if config.STORAGE_ENGINE is not None:
         kwargs["storageEngine"] = config.STORAGE_ENGINE
 

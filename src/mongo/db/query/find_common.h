@@ -155,7 +155,7 @@ public:
             }
 
             _builder->append(obj);
-            _docUnitsReturned->observeOneDoc(objSize);
+            _docUnitsReturned->observeOne(objSize);
 
             // If this executor produces a postBatchResumeToken, store it. We will set the
             // latest valid 'pbrt' on the batch at the end of batched execution.
@@ -217,11 +217,7 @@ public:
      */
     static void waitInFindBeforeMakingBatch(OperationContext* opCtx,
                                             const CanonicalQuery& cq,
-                                            FailPoint* fp) {
-        if (MONGO_unlikely(fp->shouldFail())) {
-            _waitInFindBeforeMakingBatchImpl(opCtx, cq, fp);
-        }
-    }
+                                            FailPoint* fp);
 
     /**
      * Computes an initial preallocation size for the GetMore reply buffer based on its
@@ -256,11 +252,6 @@ public:
         std::size_t _numberOfDocuments{0};
         std::size_t _bsonArraySizeInBytes{0};
     };
-
-private:
-    static void _waitInFindBeforeMakingBatchImpl(OperationContext* opCtx,
-                                                 const CanonicalQuery& cq,
-                                                 FailPoint* fp);
 };
 
 }  // namespace mongo

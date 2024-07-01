@@ -151,6 +151,7 @@
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/serialization_context.h"
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
@@ -444,7 +445,7 @@ private:
 void finishCurOp(OperationContext* opCtx, CurOp* curOp, LogicalOp logicalOp) {
     try {
         curOp->done();
-        auto executionTimeMicros = duration_cast<Microseconds>(curOp->elapsedTimeExcludingPauses());
+        auto executionTimeMicros = curOp->elapsedTimeExcludingPauses();
         curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
@@ -497,7 +498,7 @@ void setCurOpInfoAndEnsureStarted(OperationContext* opCtx,
     curOp->setNS_inlock(nsEntry.getIsTimeseriesNamespace()
                             ? nsEntry.getNs().getTimeseriesViewNamespace()
                             : nsEntry.getNs());
-    curOp->setNetworkOp_inlock(NetworkOp::dbBulkWrite);
+    curOp->setNetworkOp_inlock(NetworkOp::dbMsg);
     curOp->setLogicalOp_inlock(LogicalOp::opBulkWrite);
     curOp->setOpDescription_inlock(opDescription);
     curOp->ensureStarted();
@@ -782,16 +783,19 @@ bool handleGroupedInserts(OperationContext* opCtx,
     const size_t maxBatchBytes = write_ops::insertVectorMaxBytes;
     batch.reserve(std::min(numOps, maxBatchSize));
 
+    // If 'req.getBypassEmptyTsReplacement()' is true, set "bypassEmptyTsReplacement=true" for
+    // fixDocumentForInsert().
+    const bool bypassEmptyTsReplacement = static_cast<bool>(req.getBypassEmptyTsReplacement());
+
     for (size_t i = 0; i < numOps; i++) {
         const bool isLastDoc = (i == numOps - 1);
 
         auto idx = firstOpIdx + i;
         auto& doc = insertDocs[i];
-        const bool preserveEmptyTimestamps = false;
         bool containsDotsAndDollarsField = false;
 
-        auto fixedDoc =
-            fixDocumentForInsert(opCtx, doc, preserveEmptyTimestamps, &containsDotsAndDollarsField);
+        auto fixedDoc = fixDocumentForInsert(
+            opCtx, doc, bypassEmptyTsReplacement, &containsDotsAndDollarsField);
 
         auto stmtId = opCtx->isRetryableWrite() ? bulk_write_common::getStatementId(req, idx)
                                                 : kUninitializedStmtId;
@@ -1027,10 +1031,14 @@ BSONObj makeSingleOpSampledBulkWriteCommandRequest(OperationContext* opCtx,
     singleOpRequest.setLet(req.getLet());
     singleOpRequest.setStmtId(bulk_write_common::getStatementId(req, opIdx));
     singleOpRequest.setDbName(DatabaseName::kAdmin);
+    singleOpRequest.setBypassEmptyTsReplacement(req.getBypassEmptyTsReplacement());
 
-    return singleOpRequest.toBSON(
-        BSON(BulkWriteCommandRequest::kDbNameFieldName << DatabaseNameUtil::serialize(
-                 DatabaseName::kAdmin, SerializationContext::stateCommandRequest())));
+    // Need to manually append "$db" since it is only included when serializing directly to OP_MSG.
+    BSONObjBuilder bob(singleOpRequest.toBSON());
+    bob.append(BulkWriteCommandRequest::kDbNameFieldName,
+               DatabaseNameUtil::serialize(DatabaseName::kAdmin,
+                                           SerializationContext::stateCommandRequest()));
+    return bob.obj();
 }
 
 bool handleDeleteOp(OperationContext* opCtx,
@@ -1184,6 +1192,7 @@ void explainUpdateOp(OperationContext* opCtx,
     updateRequest.setSort(op->getSort().value_or(BSONObj()));
     updateRequest.setHint(op->getHint());
     updateRequest.setCollation(op->getCollation().value_or(BSONObj()));
+    updateRequest.setBypassEmptyTsReplacement(req.getBypassEmptyTsReplacement());
     updateRequest.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
     updateRequest.setUpsert(op->getUpsert());
     updateRequest.setUpsertSuppliedDocument(op->getUpsertSupplied().value_or(false));
@@ -1665,9 +1674,8 @@ bool handleUpdateOp(OperationContext* opCtx,
 
         // Handle non-retryable normal and timeseries updates, as well as retryable normal
         // updates that were not already executed.
-
         auto updateRequest = bulk_write_common::makeUpdateRequestFromUpdateOp(
-            opCtx, nsEntry, op, stmtId, req.getLet());
+            opCtx, nsEntry, op, stmtId, req.getLet(), req.getBypassEmptyTsReplacement());
 
         if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
                 opCtx,

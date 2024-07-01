@@ -39,6 +39,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/basic_types_gen.h"
+#include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -47,6 +48,7 @@
 #include "mongo/db/query/plan_cache_callbacks.h"
 #include "mongo/db/query/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_explainer_factory.h"
+#include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/stage_types.h"
@@ -56,6 +58,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/overloaded_visitor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -128,10 +131,11 @@ bool shouldCacheBasedOnQueryAndPlan(const CanonicalQuery& query, const QuerySolu
     return false;
 }
 
-void updateClassicPlanCacheFromClassicCandidates(
+void updateClassicPlanCacheFromClassicCandidatesImpl(
     OperationContext* opCtx,
     const CollectionPtr& collection,
     const CanonicalQuery& query,
+    ReadsOrWorks readsOrWorks,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
     std::vector<plan_ranker::CandidatePlan>& candidates) {
     auto winnerIdx = ranking->candidateOrder[0];
@@ -153,12 +157,15 @@ void updateClassicPlanCacheFromClassicCandidates(
     winningPlan.solution->cacheData->indexFilterApplied = winningPlan.solution->indexFilterApplied;
     winningPlan.solution->cacheData->solutionHash = winningPlan.solution->hash();
     auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
+
+    auto key = plan_cache_key_factory::make<PlanCacheKey>(query, collection);
+
     uassertStatusOK(
         CollectionQueryInfo::get(collection)
             .getPlanCache()
-            ->set(plan_cache_key_factory::make<PlanCacheKey>(query, collection),
+            ->set(std::move(key),
                   winningPlan.solution->cacheData->clone(),
-                  *ranking,
+                  readsOrWorks,
                   opCtx->getServiceContext()->getPreciseClockSource()->now(),
                   &callbacks,
                   isSensitive ? PlanSecurityLevel::kSensitive : PlanSecurityLevel::kNotSensitive,
@@ -168,7 +175,7 @@ void updateClassicPlanCacheFromClassicCandidates(
 void updateSbePlanCache(OperationContext* opCtx,
                         const MultipleCollectionAccessor& collections,
                         const CanonicalQuery& query,
-                        const plan_ranker::PlanRankingDecision& ranking,
+                        NumReads nReads,
                         const QuerySolution* soln,
                         std::unique_ptr<sbe::CachedSbePlan> cachedPlan) {
     auto buildDebugInfoFn = [soln]() -> plan_cache_debug_info::DebugInfoSBE {
@@ -184,11 +191,12 @@ void updateSbePlanCache(OperationContext* opCtx,
         callbacks{query, buildDebugInfoFn, printCachedPlanFn};
 
     auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
+
     uassertStatusOK(sbe::getPlanCache(opCtx).set(
         plan_cache_key_factory::make(
             query, collections, canonical_query_encoder::Optimizer::kSbeStageBuilders),
         std::move(cachedPlan),
-        ranking,
+        nReads,
         opCtx->getServiceContext()->getPreciseClockSource()->now(),
         &callbacks,
         isSensitive ? PlanSecurityLevel::kSensitive : PlanSecurityLevel::kNotSensitive,
@@ -196,6 +204,38 @@ void updateSbePlanCache(OperationContext* opCtx,
 }
 
 }  // namespace
+
+void updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
+    OperationContext* opCtx,
+    const CollectionPtr& collection,
+    const CanonicalQuery& query,
+    NumReads reads,
+    std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
+    std::vector<plan_ranker::CandidatePlan>& candidates) {
+    invariant(query.isSbeCompatible());
+
+    updateClassicPlanCacheFromClassicCandidatesImpl(
+        opCtx, collection, query, reads, std::move(ranking), candidates);
+}
+
+void updateClassicPlanCacheFromClassicCandidatesForClassicExecution(
+    OperationContext* opCtx,
+    const CollectionPtr& collection,
+    const CanonicalQuery& query,
+    std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
+    std::vector<plan_ranker::CandidatePlan>& candidates) {
+    ReadsOrWorks nWorks =
+        visit(OverloadedVisitor{[&](const plan_ranker::StatsDetails& details) -> ReadsOrWorks {
+                                    return NumWorks{details.candidatePlanStats[0]->common.works};
+                                },
+                                [](const plan_ranker::SBEStatsDetails& details) -> ReadsOrWorks {
+                                    MONGO_UNREACHABLE;
+                                }},
+              ranking->stats);
+
+    updateClassicPlanCacheFromClassicCandidatesImpl(
+        opCtx, collection, query, nWorks, std::move(ranking), candidates);
+}
 
 void updateSbePlanCacheFromSbeCandidates(OperationContext* opCtx,
                                          const MultipleCollectionAccessor& collections,
@@ -221,16 +261,23 @@ void updateSbePlanCacheFromSbeCandidates(OperationContext* opCtx,
                                              winningPlan.solution->hash());
     cachedPlan->indexFilterApplied = winningPlan.solution->indexFilterApplied;
 
+    NumReads nReads =
+        visit(OverloadedVisitor{
+                  [&](const plan_ranker::StatsDetails& details) -> NumReads { MONGO_UNREACHABLE; },
+                  [](const plan_ranker::SBEStatsDetails& details) -> NumReads {
+                      return NumReads{calculateNumberOfReads(details.candidatePlanStats[0].get())};
+                  }},
+              ranking->stats);
+
     updateSbePlanCache(
-        opCtx, collections, query, *ranking, winningPlan.solution.get(), std::move(cachedPlan));
+        opCtx, collections, query, nReads, winningPlan.solution.get(), std::move(cachedPlan));
 }
 
-void updateSbePlanCacheFromClassicCandidates(
+void updateSbePlanCacheWithNumReads(
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
     const CanonicalQuery& query,
-    const plan_ranker::PlanRankingDecision& ranking,
-    const std::vector<plan_ranker::CandidatePlan>& candidates,
+    NumReads nReads,
     const std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>& sbePlanAndData,
     const QuerySolution* winningSolution) {
     if (!shouldCacheBasedOnQueryAndPlan(query, winningSolution)) {
@@ -242,7 +289,7 @@ void updateSbePlanCacheFromClassicCandidates(
         sbePlanAndData.first->clone(), sbePlanAndData.second, winningSolution->hash());
     cachedPlan->indexFilterApplied = winningSolution->indexFilterApplied;
 
-    updateSbePlanCache(opCtx, collections, query, ranking, winningSolution, std::move(cachedPlan));
+    updateSbePlanCache(opCtx, collections, query, nReads, winningSolution, std::move(cachedPlan));
 }
 
 void updateSbePlanCacheWithPinnedEntry(OperationContext* opCtx,
@@ -384,19 +431,31 @@ plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution
 }
 
 void ClassicPlanCacheWriter::operator()(const CanonicalQuery& cq,
+                                        MultiPlanStage& mps,
                                         std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
                                         std::vector<plan_ranker::CandidatePlan>& candidates) const {
-    updateClassicPlanCacheFromClassicCandidates(
-        _opCtx, _collection.getCollectionPtr(), cq, std::move(ranking), candidates);
+    // Note this function is also called by ConditionalClassicPlanCacheWriter.
+
+    if (_executeInSbe) {
+        auto stats = mps.getStats();
+        auto nReads = computeNumReadsFromWorks(*stats, *ranking);
+
+        updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
+            _opCtx, _collection.getCollectionPtr(), cq, nReads, std::move(ranking), candidates);
+    } else {
+        // We've been asked to write a works value, for classic execution.
+        updateClassicPlanCacheFromClassicCandidatesForClassicExecution(
+            _opCtx, _collection.getCollectionPtr(), cq, std::move(ranking), candidates);
+    }
 }
 
 void ConditionalClassicPlanCacheWriter::operator()(
     const CanonicalQuery& cq,
+    MultiPlanStage& mps,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
     std::vector<plan_ranker::CandidatePlan>& candidates) const {
     if (shouldCacheBasedOnCachingMode(cq, *ranking, candidates)) {
-        updateClassicPlanCacheFromClassicCandidates(
-            _opCtx, _collection.getCollectionPtr(), cq, std::move(ranking), candidates);
+        ClassicPlanCacheWriter::operator()(cq, mps, std::move(ranking), candidates);
     }
 }
 
@@ -458,6 +517,16 @@ bool ConditionalClassicPlanCacheWriter::shouldCacheBasedOnCachingMode(
     }
 
     MONGO_UNREACHABLE;
+}
+
+NumReads computeNumReadsFromWorks(const PlanStageStats& stats,
+                                  const plan_ranker::PlanRankingDecision& ranking) {
+    auto winnerIdx = ranking.candidateOrder[0];
+    auto summary = collectExecutionStatsSummary(&stats, winnerIdx);
+    tassert(8523807,
+            "Expected StatsDetails in classic runtime planner ranking decision.",
+            std::holds_alternative<plan_ranker::StatsDetails>(ranking.stats));
+    return NumReads{summary.totalKeysExamined + summary.totalDocsExamined};
 }
 
 }  // namespace plan_cache_util

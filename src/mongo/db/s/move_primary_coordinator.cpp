@@ -82,6 +82,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/move_primary_gen.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
@@ -94,7 +95,33 @@
 namespace mongo {
 using namespace fmt::literals;
 
+namespace {
+
 MONGO_FAIL_POINT_DEFINE(hangBeforeCloningData);
+MONGO_FAIL_POINT_DEFINE(movePrimaryFailIfNeedToCloneMovableCollections);
+
+/**
+ * Returns true if this unsharded collection can be moved by a moveCollection command.
+ */
+bool isMovableUnshardedCollection(const NamespaceString& nss, bool timeseriesReshardingSupported) {
+    if (nss.isFLE2StateCollection()) {
+        // TODO (SERVER-83713): Reconsider isFLE2StateCollection check.
+        return false;
+    }
+
+    if (nss.isTimeseriesBucketsCollection()) {
+        return timeseriesReshardingSupported;
+    }
+
+    if (nss.isLegalClientSystemNS()) {
+        // TODO (SERVER-90876): Make movePrimaryFailIfNeedToCloneMovableCollections only allow
+        // movePrimary to move unsharded collections that are not movable by moveCollection.
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 MovePrimaryCoordinator::MovePrimaryCoordinator(ShardingDDLCoordinatorService* service,
                                                const BSONObj& initialState)
@@ -476,6 +503,35 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
                         collectionsToIgnore.cend(),
                         std::back_inserter(collectionsToClone));
 
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    bool timeseriesReshardingSupported = fcvSnapshot.isVersionInitialized() &&
+        resharding::gFeatureFlagReshardingForTimeseries.isEnabled(fcvSnapshot);
+
+    for (const auto& nss : collectionsToClone) {
+        movePrimaryFailIfNeedToCloneMovableCollections.executeIf(
+            [&](const BSONObj& data) {
+                if (isMovableUnshardedCollection(nss, timeseriesReshardingSupported)) {
+                    AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+                    uassert(9046501,
+                            str::stream() << "Found a user collection to clone: "
+                                          << nss.toStringForErrorMsg(),
+                            !autoColl);
+                }
+            },
+            [&](const BSONObj& data) {
+                if (!data.hasField("comment")) {
+                    return true;
+                }
+                // If this failpoint is configured with a "comment", only fail the command if
+                // its "comment" matches the failpoint's "comment".
+                if (!opCtx->getComment()) {
+                    return false;
+                }
+                return opCtx->getComment()->checkAndGetStringData() ==
+                    data.getStringField("comment");
+            });
+    }
+
     return collectionsToClone;
 }
 
@@ -732,6 +788,7 @@ void MovePrimaryCoordinator::unblockReadsAndWrites(OperationContext* opCtx) cons
         NamespaceString(_dbName),
         _csReason,
         ShardingCatalogClient::kLocalWriteConcern,
+        ShardingRecoveryService::NoCustomAction(),
         false /*throwIfReasonDiffers*/);
 }
 

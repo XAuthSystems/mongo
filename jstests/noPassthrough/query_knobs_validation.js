@@ -5,7 +5,10 @@
  * parameter's valid bounds.
  */
 
-import {checkCascadesFeatureFlagEnabled} from "jstests/libs/optimizer_utils.js";
+import {
+    checkCascadesFeatureFlagEnabled,
+    getExpectedPipelineLimit,
+} from "jstests/libs/optimizer_utils.js";
 
 const conn = MongoRunner.runMongod();
 const testDB = conn.getDB("admin");
@@ -69,6 +72,7 @@ const expectedParamDefaults = {
     internalQuerySlotBasedExecutionDisableTimeSeriesPushdown: false,
     internalQueryCollectOptimizerMetrics: false,
     internalQueryDisablePlanCache: false,
+    internalQueryFindCommandBatchSize: 101,
 };
 
 function assertDefaultParameterValues() {
@@ -95,12 +99,9 @@ function assertSetParameterFails(paramName, value) {
                                  ErrorCodes.BadValue);
 }
 
-// InternalPipelineLengthLimit is different is lowered in a debug build so its expected value
-// depends on that
 const getParamRes =
     assert.commandWorked(testDB.adminCommand({getParameter: 1, internalPipelineLengthLimit: 1}));
-assert.eq(getParamRes["internalPipelineLengthLimit"],
-          testDB.adminCommand("buildInfo").debug ? 200 : 1000);
+assert.eq(getParamRes["internalPipelineLengthLimit"], getExpectedPipelineLimit(testDB));
 
 // Verify that the default values are set as expected when the server starts up.
 assertDefaultParameterValues();
@@ -320,5 +321,9 @@ assertSetParameterSucceeds("internalQueryCollectOptimizerMetrics", false);
 
 assertSetParameterSucceeds("internalQueryDisablePlanCache", true);
 assertSetParameterSucceeds("internalQueryDisablePlanCache", false);
+
+assertSetParameterSucceeds("internalQueryFindCommandBatchSize", 30);
+assertSetParameterFails("internalQueryFindCommandBatchSize", 0);
+assertSetParameterFails("internalQueryFindCommandBatchSize", -1);
 
 MongoRunner.stopMongod(conn);

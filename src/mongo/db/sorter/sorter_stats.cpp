@@ -59,11 +59,19 @@ void SorterStats::incrementSpilledRanges() {
 }
 
 void SorterStats::setSpilledRanges(uint64_t spills) {
-    invariant(_spilledRanges == 0);
-    _spilledRanges = spills;
-    if (_sorterTracker) {
-        _sorterTracker->spilledRanges.fetchAndAdd(spills);
+    if (spills == _spilledRanges) {
+        return;
     }
+
+    if (_sorterTracker) {
+        if (spills > _spilledRanges) {
+            _sorterTracker->spilledRanges.fetchAndAdd(spills - _spilledRanges);
+        } else {
+            _sorterTracker->spilledRanges.fetchAndSubtract(_spilledRanges - spills);
+        }
+    }
+
+    _spilledRanges = spills;
 }
 
 uint64_t SorterStats::spilledRanges() const {
@@ -100,7 +108,12 @@ void SorterStats::incrementMemUsage(uint64_t memUsage) {
 }
 
 void SorterStats::decrementMemUsage(uint64_t memUsage) {
-    invariant(memUsage <= _memUsage);
+    // SERVER-61281 added memoisation for the memory usage of a document. The memory usage is stored
+    // in '_snapshottedSize' and the value is not always up-to-date. Thus, it is possible for the
+    // same document the 'memUsage' to have increased between the calls of 'incrementMemUsage' and
+    // 'decrementMemUsage'. In this case, when 'decrementMemUsage' is called, 'memUsage' might be
+    // greater than '_memUsage'.
+    memUsage = std::min(memUsage, _memUsage);
     _memUsage -= memUsage;
     if (_sorterTracker) {
         _sorterTracker->memUsage.fetchAndSubtract(memUsage);

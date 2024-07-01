@@ -34,8 +34,10 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/generic_argument_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/shard_id.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/request_types/merge_chunk_request_gen.h"
@@ -48,7 +50,6 @@
 namespace mongo {
 namespace {
 
-using unittest::assertGet;
 
 ChunkRange chunkRange(BSON("a" << 1), BSON("a" << 10));
 IDLParserContext ctx("_configsvrCommitChunksMerge");
@@ -78,13 +79,12 @@ TEST(ConfigSvrMergeChunks, ConfigCommandtoBSON) {
              << "shard"
              << "shard0000"
              << "collUUID" << collUUID.toBSON() << "chunkRange" << chunkRange.toBSON());
-    BSONObj writeConcernObj = BSON("w"
-                                   << "majority");
+    auto writeConcern = generic_argument_util::kMajorityWriteConcern;
 
     BSONObjBuilder cmdBuilder;
     {
         cmdBuilder.appendElements(serializedRequest);
-        cmdBuilder.append("writeConcern", writeConcernObj);
+        cmdBuilder.append("writeConcern", writeConcern.toBSON());
     }
 
     auto appendDB = [](const BSONObj& obj) {
@@ -95,7 +95,8 @@ TEST(ConfigSvrMergeChunks, ConfigCommandtoBSON) {
     };
 
     auto request = ConfigSvrMergeChunks::parse(ctx, appendDB(serializedRequest));
-    auto requestToBSON = request.toBSON(BSON("writeConcern" << writeConcernObj));
+    request.setWriteConcern(writeConcern);
+    auto requestToBSON = request.toBSON();
 
     ASSERT_BSONOBJ_EQ(cmdBuilder.obj(), requestToBSON);
 }

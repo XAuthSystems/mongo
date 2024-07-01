@@ -60,7 +60,6 @@
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_command_gen.h"
-#include "mongo/db/query/max_time_ms_parser.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/tailable_mode_gen.h"
@@ -83,7 +82,6 @@ namespace mongo {
 namespace {
 
 using std::unique_ptr;
-using unittest::assertGet;
 
 static const NamespaceString testns =
     NamespaceString::createNamespaceString_forTest("testdb.testcoll");
@@ -488,7 +486,7 @@ TEST(QueryRequestTest, ParseFromCommandAllFlagsTrue) {
         "allowPartialResults: true,"
         "readOnce: true,"
         "includeQueryStatsMetrics: true,"
-        "allowSpeculativeMajorityRead: true, '$db': 'test'}");
+        "'$db': 'test'}");
 
     unique_ptr<FindCommandRequest> findCommand(
         query_request_helper::makeFromFindCommandForTests(cmdObj));
@@ -500,7 +498,6 @@ TEST(QueryRequestTest, ParseFromCommandAllFlagsTrue) {
     ASSERT(findCommand->getAllowPartialResults());
     ASSERT(findCommand->getReadOnce());
     ASSERT(findCommand->getIncludeQueryStatsMetrics());
-    ASSERT(findCommand->getAllowSpeculativeMajorityRead());
 }
 
 TEST(QueryRequestTest, OplogReplayFlagIsAllowedButIgnored) {
@@ -512,7 +509,7 @@ TEST(QueryRequestTest, OplogReplayFlagIsAllowedButIgnored) {
     auto findCommand = query_request_helper::makeFromFindCommandForTests(cmdObj);
 
     // Verify that the 'oplogReplay' flag does not appear if we reserialize the request.
-    auto reserialized = findCommand->toBSON(BSONObj());
+    auto reserialized = findCommand->toBSON();
     ASSERT_BSONOBJ_EQ(reserialized,
                       BSON("find"
                            << "testns"
@@ -559,7 +556,7 @@ TEST(QueryRequestTest, ParseFromCommandAllNonOptionFields) {
                          "sort: {b: 1},"
                          "projection: {c: 1},"
                          "hint: {d: 1},"
-                         "readConcern: {e: 1},"
+                         "readConcern: {level: 'local'},"
                          "$queryOptions: {$readPreference: 'secondary'},"
                          "collation: {f: 1},"
                          "limit: 3,"
@@ -579,12 +576,13 @@ TEST(QueryRequestTest, ParseFromCommandAllNonOptionFields) {
     ASSERT_EQUALS(0, expectedProj.woCompare(findCommand->getProjection()));
     BSONObj expectedHint = BSON("d" << 1);
     ASSERT_EQUALS(0, expectedHint.woCompare(findCommand->getHint()));
-    BSONObj expectedReadConcern = BSON("e" << 1);
     ASSERT(findCommand->getReadConcern());
-    ASSERT_BSONOBJ_EQ(expectedReadConcern, *findCommand->getReadConcern());
+    ASSERT_BSONOBJ_EQ(repl::ReadConcernArgs::kLocal.toBSONInner(),
+                      findCommand->getReadConcern()->toBSONInner());
     BSONObj expectedUnwrappedReadPref = BSON("$readPreference"
                                              << "secondary");
-    ASSERT_EQUALS(0, expectedUnwrappedReadPref.woCompare(findCommand->getUnwrappedReadPref()));
+    ASSERT_BSONOBJ_EQ(expectedUnwrappedReadPref,
+                      findCommand->getUnwrappedReadPref().value_or(BSONObj()));
     BSONObj expectedCollation = BSON("f" << 1);
     ASSERT_EQUALS(0, expectedCollation.woCompare(findCommand->getCollation()));
     ASSERT_EQUALS(3, *findCommand->getLimit());
@@ -1060,12 +1058,12 @@ TEST(QueryRequestTest, AsFindCommandRequestAllNonOptionFields) {
                          "limit: 3,"
                          "batchSize: 90,"
                          "singleBatch: true, "
-                         "readConcern: {e: 1}, '$db': 'test'}")
+                         "readConcern: {level: 'local'}, '$db': 'test'}")
                          .addField(storage["runtimeConstants"]);
 
     unique_ptr<FindCommandRequest> findCommand(
         query_request_helper::makeFromFindCommandForTests(cmdObj));
-    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand->toBSON(BSONObj()));
+    ASSERT_BSONOBJ_EQ_UNORDERED(cmdObj.removeField("$db"), findCommand->toBSON());
 }
 
 TEST(QueryRequestTest, AsFindCommandRequestWithUuidAllNonOptionFields) {
@@ -1084,12 +1082,12 @@ TEST(QueryRequestTest, AsFindCommandRequestWithUuidAllNonOptionFields) {
             "limit: 3,"
             "batchSize: 90,"
             "singleBatch: true,"
-            "readConcern: {e: 1}, '$db': 'test'}")
+            "readConcern: {level: 'local'}, '$db': 'test'}")
             .addField(storage["runtimeConstants"]);
 
     unique_ptr<FindCommandRequest> findCommand(
         query_request_helper::makeFromFindCommandForTests(cmdObj));
-    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand->toBSON(BSONObj()));
+    ASSERT_BSONOBJ_EQ_UNORDERED(cmdObj.removeField("$db"), findCommand->toBSON());
 }
 
 TEST(QueryRequestTest, AsFindCommandRequestWithUuidNoAvailableNamespace) {
@@ -1098,7 +1096,7 @@ TEST(QueryRequestTest, AsFindCommandRequestWithUuidNoAvailableNamespace) {
     FindCommandRequest findCommand(
         NamespaceStringOrUUID(DatabaseName::createDatabaseName_forTest(boost::none, "test"),
                               UUID::parse("01234567-89ab-cdef-edcb-a98765432101").getValue()));
-    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand.toBSON(BSONObj()));
+    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand.toBSON());
 }
 
 TEST(QueryRequestTest, AsFindCommandRequestWithResumeToken) {
@@ -1111,7 +1109,7 @@ TEST(QueryRequestTest, AsFindCommandRequestWithResumeToken) {
 
     unique_ptr<FindCommandRequest> findCommand(
         query_request_helper::makeFromFindCommandForTests(cmdObj));
-    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand->toBSON(BSONObj()));
+    ASSERT_BSONOBJ_EQ(cmdObj.removeField("$db"), findCommand->toBSON());
 }
 
 TEST(QueryRequestTest, AsFindCommandRequestWithEmptyResumeToken) {
@@ -1124,7 +1122,7 @@ TEST(QueryRequestTest, AsFindCommandRequestWithEmptyResumeToken) {
              << "test");
     unique_ptr<FindCommandRequest> findCommand(
         query_request_helper::makeFromFindCommandForTests(cmdObj));
-    ASSERT(findCommand->toBSON(BSONObj()).getField("$_resumeAftr").eoo());
+    ASSERT(findCommand->toBSON().getField("$_resumeAftr").eoo());
 }
 
 //
@@ -1208,9 +1206,9 @@ TEST(QueryRequestTest, ParseCommandFirstFieldNotString) {
                        ErrorCodes::TypeMismatch);
 }
 
-TEST(QueryRequestTest, ParseCommandIgnoreShardVersionField) {
+TEST(QueryRequestTest, ParseCommandFailsWithInvalidShardVersionField) {
     BSONObj cmdObj = fromjson("{find: 'test.testns', shardVersion: 'foo', '$db': 'test'}");
-    query_request_helper::makeFromFindCommandForTests(cmdObj);
+    ASSERT_THROWS(query_request_helper::makeFromFindCommandForTests(cmdObj), DBException);
 }
 
 TEST(QueryRequestTest, DefaultQueryParametersCorrect) {
@@ -1272,70 +1270,6 @@ TEST(QueryRequestTest, ParseFromCommandForbidExtraOption) {
     ASSERT_THROWS_CODE(query_request_helper::makeFromFindCommandForTests(cmdObj),
                        DBException,
                        ErrorCodes::IDLUnknownField);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSStringValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << "foo");
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSBoolValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << true);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSNullValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << BSONNULL);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSUndefinedValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << BSONUndefined);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSEmptyObjectValueFails) {
-    const auto emptyObj = BSONObjBuilder().obj();
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << emptyObj);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSNonIntegralValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 100.3);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSOutOfRangeDoubleFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 1e200);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSNegativeValueFails) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << -400);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
-              ErrorCodes::BadValue);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSZeroSucceeds) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 0);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 0);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSEmptyElementSucceeds) {
-    const auto emptyElem = BSONElement();
-    ASSERT_EQ(parseMaxTimeMS(emptyElem), 0);
-}
-
-TEST(QueryRequestTest, ParseMaxTimeMSPositiveInRangeSucceeds) {
-    BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 300);
-    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 300);
 }
 
 TEST(QueryRequestTest, ConvertToAggregationSucceeds) {
@@ -1558,14 +1492,6 @@ TEST(QueryRequestTest, ConvertToAggregationWithReadOnceFails) {
                        ErrorCodes::InvalidPipelineOperator);
 }
 
-TEST(QueryRequestTest, ConvertToAggregationWithAllowSpeculativeMajorityReadFails) {
-    FindCommandRequest findCommand(testns);
-    findCommand.setAllowSpeculativeMajorityRead(true);
-    ASSERT_THROWS_CODE(query_request_conversion::asAggregateCommandRequest(findCommand),
-                       DBException,
-                       ErrorCodes::InvalidPipelineOperator);
-}
-
 TEST(QueryRequestTest, ConvertToAggregationWithLegacyRuntimeConstantsSucceeds) {
     LegacyRuntimeConstants rtc{Date_t::now(), Timestamp(1, 1)};
     FindCommandRequest findCommand(testns);
@@ -1614,7 +1540,7 @@ TEST(QueryRequestTest, ConvertToAggregationWithIncludeQueryStatsMetricsFalseSucc
 TEST(QueryRequestTest, ConvertToFindWithAllowDiskUseTrueSucceeds) {
     FindCommandRequest findCommand(testns);
     findCommand.setAllowDiskUse(true);
-    const auto findCmd = findCommand.toBSON(BSONObj());
+    const auto findCmd = findCommand.toBSON();
 
     BSONElement elem = findCmd[FindCommandRequest::kAllowDiskUseFieldName];
     ASSERT_EQ(true, elem.isBoolean());
@@ -1624,7 +1550,7 @@ TEST(QueryRequestTest, ConvertToFindWithAllowDiskUseTrueSucceeds) {
 TEST(QueryRequestTest, ConvertToFindWithAllowDiskUseFalseSucceeds) {
     FindCommandRequest findCommand(testns);
     findCommand.setAllowDiskUse(false);
-    const auto findCmd = findCommand.toBSON(BSONObj());
+    const auto findCmd = findCommand.toBSON();
 
     ASSERT_FALSE(findCmd[FindCommandRequest::kAllowDiskUseFieldName].booleanSafe());
 }

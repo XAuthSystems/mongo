@@ -315,7 +315,7 @@ public:
                                       const ReplSetRequestVotesArgs&,
                                       ReplSetRequestVotesResponse*) final;
 
-    void prepareReplMetadata(const CommonRequestArgs&, const OpTime&, BSONObjBuilder*) const final;
+    void prepareReplMetadata(const GenericArguments&, const OpTime&, BSONObjBuilder*) const final;
 
     Status processHeartbeatV1(const ReplSetHeartbeatArgsV1&, ReplSetHeartbeatResponse*) final;
 
@@ -406,6 +406,10 @@ public:
     bool isRetryableWrite(OperationContext* opCtx) const override;
 
     boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) override;
+
+    void setConsistentDataAvailable(OperationContext* opCtx,
+                                    bool isDataMajorityCommitted) override {}
+    bool isDataConsistent() const override;
 
 private:
     ServiceContext* const _service;

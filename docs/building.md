@@ -26,15 +26,27 @@ To build MongoDB, you will need:
 MongoDB supports the following architectures: arm64, ppc64le, s390x,
 and x86-64. More detailed platform instructions can be found below.
 
-## MongoDB Tools
+## Quick (re)Start
 
-The MongoDB command line tools (`mongodump`, `mongorestore`,
-`mongoimport`, `mongoexport`, etc) have been rewritten in
-[Go](http://golang.org/) and are no longer included in this
-repository.
+### Linux Workstation
 
-The source for the tools is now available at
-[mongodb/mongo-tools](https://github.com/mongodb/mongo-tools).
+```bash
+git clean -fdx # USE WITH CAUTION! Delete every untracked file including .gitignored files (this is basically everything)
+# Close and reopen your terminal to clear out any problems from your old environment
+python3 --version # Should be >=3.10. If it is not, follow [online instructions](https://www.python.org/downloads/) to install python.
+python3 -m venv python3-venv --prompt mongo # Create a virtual environment. "python3-venv" is non standard but it is kept since it is assumed elsewhere in our code.
+source python3-venv/bin/activate # You should see a (mongo) appear in your terminal
+which python3 # This should point to the python in python3-venv
+
+# It is also non standard to install poetry into its own virtual environment.
+# However, the idea is to make even fewer unpinned dependencies.
+# Install poetry 1.5.1 into the virtual env, then install all
+# required python dependencies to build and test.
+buildscripts/poetry_sync.sh
+
+python3 buildscripts/scons.py --build-profile=opt
+ninja -f opt.ninja -j 200 install-devcore
+```
 
 ## Python Prerequisites
 
@@ -51,8 +63,7 @@ dedicated to building MongoDB is optional but recommended.
 
     $ python3 -m venv <venv_path> --prompt mongo # Optional (venv_path can be a path of your choice)
     $ source <venv_path>/bin/activate # Optional (might be slightly different based on the your shell)
-    $ python3 -m pip install 'poetry==1.5.1'
-    $ python3 -m poetry install --no-root --sync
+    $ buildscripts/poetry_sync.sh -i
 
 Note: In order to compile C-based Python modules, you'll also need the
 Python and OpenSSL C headers. Run:
@@ -61,7 +72,9 @@ Python and OpenSSL C headers. Run:
 - Ubuntu (20.04 and newer)/Debian (Bullseye and newer) - `apt install python-dev-is-python3 libssl-dev`
 - Ubuntu (18.04 and older)/Debian (Buster and older) - `apt install python3.7-dev libssl-dev`
 
-Note: If you are seeing errors involving "Prompt dismissed.." you might need to run the following command before poetry install.
+Note: If you are running poetry manually and seeing errors involving "Prompt
+dismissed.." you might need to run the following command before poetry install
+(`buildscripts/poetry-sync.sh` does this internally).
 
     $ export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 
