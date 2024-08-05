@@ -104,13 +104,19 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
             return opts.serializeLiteral(_spec.getMongotQuery());
         }
     }
+    // If the query is an explain that executed the query, we obtain the explain object from the
+    // taskExecutorCursor. Otherwise, we need to obtain the explain
+    // object now.
+    boost::optional<BSONObj> explainResponse = boost::none;
+    if (_cursor) {
+        explainResponse = _cursor->getCursorExplain();
+    }
 
-    // Explain with queryPlanner verbosity does not execute the query, so the _explainResponse
-    // may not be populated. In that case, we fetch the response here instead.
-    BSONObj explainInfo = _explainResponse.isEmpty()
-        ? mongot_cursor::getSearchExplainResponse(
-              pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get())
-        : _explainResponse;
+    BSONObj explainInfo = explainResponse.value_or_eval([&] {
+        return mongot_cursor::getSearchExplainResponse(
+            pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get());
+    });
+
     MutableDocument mDoc;
     mDoc.addField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName,
                   opts.serializeLiteral(_spec.getMongotQuery()));
@@ -149,29 +155,6 @@ Value DocumentSourceInternalSearchMongotRemote::serialize(const SerializationOpt
     return Value(Document{{getSourceName(), innerSpec.freezeToValue()}});
 }
 
-boost::optional<long long> DocumentSourceInternalSearchMongotRemote::calcDocsNeeded() {
-    if (!_spec.getMongotDocsRequested().has_value()) {
-        return boost::none;
-    }
-    if (isStoredSource()) {
-        // In the stored source case, the return value will start at _mongotDocsRequested and
-        // will decrease by one for each document returned by this stage.
-        return _spec.getMongotDocsRequested().get() - _docsReturned;
-    } else {
-        // The return value will start at _mongotDocsRequested and will decrease by one
-        // for each document that gets returned by the $idLookup stage. If a document gets
-        // filtered out, docsReturnedByIdLookup will not change and so docsNeeded will stay the
-        // same.
-        tassert(91262,
-                str::stream() << "The query is not from stored source "
-                              << "(reaches out to mongot remotely), but the searchIdLookupMetrics "
-                              << "pointer is null, which is unexpected.",
-                _searchIdLookupMetrics != nullptr);
-        return _spec.getMongotDocsRequested().get() -
-            _searchIdLookupMetrics->getDocsReturnedByIdLookup();
-    }
-}
-
 boost::optional<BSONObj> DocumentSourceInternalSearchMongotRemote::_getNext() {
     try {
         return _cursor->getNext(pExpCtx->opCtx);
@@ -202,11 +185,17 @@ bool DocumentSourceInternalSearchMongotRemote::shouldReturnEOF() {
         return true;
     }
 
-    if (pExpCtx->explain) {
-        _explainResponse = mongot_cursor::getSearchExplainResponse(
-            pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get());
+    // TODO SERVER-91828 Explain execution stats not supported for sharded queries yet.
+    if (pExpCtx->needsMerge && pExpCtx->explain) {
         return true;
     }
+
+    if (pExpCtx->explain &&
+        !feature_flags::gFeatureFlagSearchExplainExecutionStats.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return true;
+    }
+
     return false;
 }
 
@@ -293,7 +282,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::getNextA
 std::unique_ptr<executor::TaskExecutorCursor>
 DocumentSourceInternalSearchMongotRemote::establishCursor() {
     auto cursors = mongot_cursor::establishCursorsForSearchStage(
-        pExpCtx, _spec, _taskExecutor, boost::none, nullptr);
+        pExpCtx, _spec, _taskExecutor, boost::none, nullptr, getSearchIdLookupMetrics());
     // Should be called only in unsharded scenario, therefore only expect a results cursor and no
     // metadata cursor.
     tassert(5253301, "Expected exactly one cursor from mongot", cursors.size() == 1);

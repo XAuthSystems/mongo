@@ -1102,6 +1102,7 @@ tasks:
         "incompatible_ppc",
         "incompatible_s390x",
         "incompatible_debian",
+        "incompatible_oscrypto",
       ]
     commands:
       - func: "f_expansions_write"
@@ -1386,8 +1387,8 @@ tasks:
     tags: [
         "assigned_to_jira_team_server_security",
         "release_critical",
-        # TODO SERVER-89541 Remove incompatible_debian tag once oscrypto gets updated
-        "incompatible_debian",
+        # TODO SERVER-89541 Remove incompatible_oscrypto tag once oscrypto gets updated
+        "incompatible_oscrypto",
         "ssl",
         "encrypt",
         "ocsp",
@@ -2417,6 +2418,26 @@ tasks:
         "default",
         "concurrency",
         "large",
+        "non_live_record",
+        "sharded",
+        "no_debug_mode",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+          resmoke_jobs_max: 1
+
+  - <<: *gen_task_template
+    name: concurrency_sharded_replication_with_balancer_and_config_transitions_and_add_remove_shard_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_catalog_and_routing",
+        "default",
+        "concurrency",
+        "large",
+        "stepdowns",
+        "kill_terminate",
         "non_live_record",
         "sharded",
         "no_debug_mode",

@@ -228,7 +228,13 @@ add_option(
 
 add_option(
     "lto",
-    help="enable link time optimizations (experimental, except with MSVC)",
+    help="enable full link time optimizations (experimental, except with MSVC)",
+    nargs=0,
+)
+
+add_option(
+    "thin-lto",
+    help="enable thin link time optimizations (experimental)",
     nargs=0,
 )
 
@@ -857,6 +863,12 @@ add_option(
     help="Installs the appropriate mongot for your architecture",
 )
 
+add_option(
+    "patch-build-mongot-url",
+    default=None,
+    help="Installs mongot binary from upstream patch on mongot-master for your architecture",
+)
+
 try:
     with open("version.json", "r") as version_fp:
         version_data = json.load(version_fp)
@@ -1065,6 +1077,18 @@ env_vars.Add(
 env_vars.Add(
     "CCFLAGS",
     help="Sets flags for the C and C++ compiler",
+    converter=variable_shlex_converter,
+)
+
+env_vars.Add(
+    "NON_CONF_CCFLAGS",
+    help="Sets flags for the C and C++ compiler that are not used in configure checks",
+    converter=variable_shlex_converter,
+)
+
+env_vars.Add(
+    "NON_CONF_LINKFLAGS",
+    help="Sets flags for the C and C++ linker that are not used in configure checks",
     converter=variable_shlex_converter,
 )
 
@@ -1550,9 +1574,9 @@ env_vars.Add(
 )
 
 env_vars.Add(
-    "ENABLE_OOM_RETRY",
-    help='Set the boolean (auto, on/off true/false 1/0) to enable retrying a compile or link commands from "out of memory" failures.',
-    converter=functools.partial(bool_var_converter, var="ENABLE_OOM_RETRY"),
+    "ENABLE_BUILD_RETRY",
+    help="Set the boolean (auto, on/off true/false 1/0) to enable retrying a compile or link commands failures.",
+    converter=functools.partial(bool_var_converter, var="ENABLE_BUILD_RETRY"),
     default="False",
 )
 
@@ -1810,6 +1834,25 @@ env.Append(
     LINKFLAGS_GENERATE_WERROR=create_werror_generator("$LINKFLAGS_WERROR"),
 )
 
+
+def non_conf_ccflags_gen(target, source, env, for_signature):
+    if "conftest" in str(target[0]):
+        return ""
+    return "$NON_CONF_CCFLAGS"
+
+
+def non_conf_linkflags_gen(target, source, env, for_signature):
+    if "conftest" in str(target[0]):
+        return ""
+    return "$NON_CONF_LINKFLAGS"
+
+
+env["_NON_CONF_CCFLAGS_GEN"] = non_conf_ccflags_gen
+env["_NON_CONF_LINKFLAGS_GEN"] = non_conf_linkflags_gen
+
+env.Append(CCFLAGS="$_NON_CONF_CCFLAGS_GEN")
+env.Append(LINKFLAGS="$_NON_CONF_LINKFLAGS_GEN")
+
 for var in ["CC", "CXX"]:
     if var not in env:
         continue
@@ -2063,13 +2106,13 @@ releaseBuild = get_option("release") == "on"
 debugBuild = get_option("dbg") == "on"
 optBuild = mongo_generators.get_opt_options(env)
 
-if env.get("ENABLE_OOM_RETRY"):
+if env.get("ENABLE_BUILD_RETRY"):
     if get_option("ninja") != "disabled":
-        print("ENABLE_OOM_RETRY not compatible with ninja, disabling ENABLE_OOM_RETRY.")
+        print("ENABLE_BUILD_RETRY not compatible with ninja, disabling ENABLE_BUILD_RETRY.")
     else:
-        env["OOM_RETRY_ATTEMPTS"] = 10
-        env["OOM_RETRY_MAX_DELAY_SECONDS"] = 120
-        env.Tool("oom_auto_retry")
+        env["BUILD_RETRY_ATTEMPTS"] = 10
+        env["BUILD_RETRY_MAX_DELAY_SECONDS"] = 120
+        env.Tool("build_auto_retry")
 
 if env.ToolchainIs("clang"):
     # LLVM utilizes the stack extensively without optimization enabled, which
@@ -2113,9 +2156,7 @@ if env.TargetOSIs("posix"):
         env.Append(
             CCFLAGS_WERROR=["-Werror"],
             CXXFLAGS_WERROR=["-Werror=unused-result"] if env.ToolchainIs("clang") else [],
-            LINKFLAGS_WERROR=[
-                "-Wl,-fatal_warnings" if env.TargetOSIs("darwin") else "-Wl,--fatal-warnings"
-            ],
+            LINKFLAGS_WERROR=["-Wl,--fatal-warnings"] if not env.TargetOSIs("darwin") else [],
         )
 elif env.TargetOSIs("windows"):
     env.Append(CCFLAGS_WERROR=["/WX"])
@@ -3247,12 +3288,12 @@ if env.TargetOSIs("posix"):
     # SERVER-9761: Ensure early detection of missing symbols in dependent
     # libraries at program startup. For non-release dynamic builds we disable
     # this behavior in the interest of improved mongod startup times.
+
+    # Xcode15 removed bind_at_load functionality so we cannot have a selection for macosx here
+    # ld: warning: -bind_at_load is deprecated on macOS
     if has_option("release") or get_option("link-model") != "dynamic":
-        env.Append(
-            LINKFLAGS=[
-                "-Wl,-bind_at_load" if env.TargetOSIs("macOS") else "-Wl,-z,now",
-            ],
-        )
+        if not env.TargetOSIs("macOS"):
+            env.Append(LINKFLAGS=["-Wl,-z,now"])
 
     # We need to use rdynamic for backtraces with glibc unless we have libunwind.
     nordyn = env.TargetOSIs("darwin") or use_libunwind
@@ -3905,6 +3946,11 @@ def doConfigure(myenv):
         # will enforce that you don't use APIs from ZZZ.
         if env.TargetOSIs("darwin"):
             env.AddToCCFLAGSIfSupported("-Wunguarded-availability")
+            env.AddToCCFLAGSIfSupported("-Wno-enum-constexpr-conversion")
+            # TODO SERVER-54659 - ASIO depends on std::result_of which was removed in C++ 20
+            myenv.Append(CPPDEFINES=["ASIO_HAS_STD_INVOKE_RESULT"])
+            # This is needed to compile boost on the newer xcodes
+            myenv.Append(CPPDEFINES=["BOOST_NO_CXX98_FUNCTION_BASE"])
 
     if get_option("runtime-hardening") == "on":
         # Enable 'strong' stack protection preferentially, but fall back to 'all' if it is not
@@ -4587,7 +4633,7 @@ def doConfigure(myenv):
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
-            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
+            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
             myenv["ENV"]["TSAN_OPTIONS"] = tsan_options + symbolizer_option
             myenv.AppendUnique(CPPDEFINES=["THREAD_SANITIZER"])
 
@@ -4765,6 +4811,12 @@ def doConfigure(myenv):
 
         # If possible with the current linker, mark relocations as read-only.
         myenv.AddToLINKFLAGSIfSupported("-Wl,-z,relro")
+
+        if has_option("thin-lto"):
+            if not myenv.AddToCCFLAGSIfSupported(
+                "-flto=thin"
+            ) or not myenv.AddToLINKFLAGSIfSupported("-flto=thin"):
+                myenv.ConfError("Failed to enable thin LTO")
 
         if linker_ld != "gold" and not env.TargetOSIs("darwin", "macOS"):
             myenv.AppendUnique(
@@ -6516,7 +6568,6 @@ else:
         action="$PYTHON ${SOURCES[0]} --dirmode lint jstests/ src/mongo",
     )
 
-
 pylinters = env.Command(
     target="#lint-pylinters",
     source=[
@@ -6721,8 +6772,8 @@ env.Alias("distsrc-zip", distSrcZip)
 env.Alias("distsrc", "distsrc-tgz")
 
 # Do this as close to last as possible before reading SConscripts, so
-# that any tools that may have injected other things via emitters are
-# included among the side effect adornments.
+# that any tools that may have injected other things via emitters are included
+# among the side effect adornments.
 env.Tool("task_limiter")
 if has_option("jlink"):
     link_jobs = env.SetupTaskLimiter(
@@ -6813,6 +6864,25 @@ if has_option("cache"):
         addNoCacheEmitter(env["BUILDERS"]["SharedArchive"])
         addNoCacheEmitter(env["BUILDERS"]["LoadableModule"])
 
+if env.GetOption("patch-build-mongot-url"):
+    binary_url = env.GetOption("patch-build-mongot-url")
+
+    env.Command(
+        target="mongot-localdev",
+        source=[],
+        action=[
+            f"curl {binary_url} | tar xvz",
+        ],
+    )
+
+    env.AutoInstall(
+        target="$PREFIX_BINDIR",
+        source=["mongot-localdev"],
+        AIB_COMPONENT="mongot",
+        AIB_ROLE="runtime",
+        AIB_COMPONENTS_EXTRA=["dist-test"],
+    )
+
 # mongot is a MongoDB-specific process written as a wrapper around Lucene. Using Lucene, mongot
 # indexes MongoDB databases to provide our customers with full text search capabilities.
 #
@@ -6820,7 +6890,7 @@ if has_option("cache"):
 # search suites. It downloads & bundles mongot with the other mongo binaries. These binaries become
 # available to the build variants in question when the binaries are extracted via archive_dist_test
 # during compilation.
-if env.GetOption("build-mongot"):
+elif env.GetOption("build-mongot"):
     # '--build-mongot` can be 'latest' or'release'
     #  - 'latest' describes the binaries created by the most recent commit merged to 10gen/mongot.
     #  - 'release' refers to the mongot binaries running in atlas prod.

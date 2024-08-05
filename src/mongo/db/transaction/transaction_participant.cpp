@@ -1616,7 +1616,10 @@ void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
 }
 
 void TransactionParticipant::Participant::unstashTransactionResources(
-    OperationContext* opCtx, const std::string& cmdName, bool forRecoveryPreparedTxnApplication) {
+    OperationContext* opCtx,
+    const std::string& cmdName,
+    bool forRecoveryPreparedTxnApplication,
+    bool forUnyield) {
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(opCtx->getTxnNumber());
 
@@ -1676,14 +1679,15 @@ void TransactionParticipant::Participant::unstashTransactionResources(
         // admission tickets. This scoped priority allows us to conditionally skip acquisition for
         // specific commands.
         boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> admissionPriority;
-        if (o().txnState.isPrepared() || cmdName == "commitTransaction" ||
-            cmdName == "abortTransaction") {
+        if (o().txnState.isPrepared() || cmdName == "prepareTransaction" ||
+            cmdName == "commitTransaction" || cmdName == "abortTransaction") {
             // commitTransaction and abortTransaction commands can skip ticketing mechanism as they
             // don't acquire any new storage resources (except writing to oplog) but they release
             // any claimed storage resources.
-            // Prepared transactions should not acquire ticket. Else, it can deadlock with other
-            // non-transactional operations that have exhausted the write tickets and are blocked on
-            // them due to prepare or lock conflict.
+            // Prepared transactions or attempts to prepare a transaction should not acquire ticket.
+            // Else, it can deadlock with other non-transactional operations that have exhausted the
+            // write tickets and are blocked on them due to prepare or lock conflict. See
+            // SERVER-41980 and SERVER-92292.
             admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
         }
 
@@ -1694,6 +1698,11 @@ void TransactionParticipant::Participant::unstashTransactionResources(
                                                    opCtx->getServiceContext()->getTickSource());
         return;
     }
+
+    uassert(9183900,
+            str::stream()
+                << "Expected to have a transaction resource stash when unyielding, but did not.",
+            !forUnyield);
 
     // If we have no transaction resources then we cannot be prepared. If we're not in progress,
     // we don't do anything else.

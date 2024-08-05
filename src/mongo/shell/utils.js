@@ -267,39 +267,6 @@ friendlyEqual = function(a, b) {
     return false;
 };
 
-// Takes two arrays of documents, and returns whether they contain the same set of documents under
-// very lenient conditions. The documents do not need to be in the same order for this to return
-// true. Arrays are treated as sets (order is disregarded). Do not use this comparator unless all of
-// these behaviors are necessary.
-unorderedFriendlyEqual = function(result1, result2) {
-    // Sort the objects fields recursively.
-    const orderFn = function(doc) {
-        const keys = Object.keys(doc);
-        keys.sort();
-        let newDoc = {};
-        for (const key of keys) {
-            // Recurse through arrays and objects.
-            if (doc[key] instanceof Object) {
-                newDoc[key] = orderFn(doc[key]);
-            } else {
-                newDoc[key] = doc[key];
-            }
-        }
-        return newDoc;
-    };
-    result1 = result1.map(orderFn);
-    result2 = result2.map(orderFn);
-
-    const cmpFn = function(doc1, doc2) {
-        const doc1Json = tojson(doc1);
-        const doc2Json = tojson(doc2);
-        return doc1Json < doc2Json ? -1 : (doc1Json > doc2Json ? 1 : 0);
-    };
-    result1.sort(cmpFn);
-    result2.sort(cmpFn);
-    return friendlyEqual(result1, result2);
-};
-
 printStackTrace = function() {
     try {
         throw new Error("Printing Stack Trace");
@@ -433,6 +400,21 @@ function _isThreadSanitizerActive() {
 
 function _isUndefinedBehaviorSanitizerActive() {
     return __sanitizeMatch("undefined");
+}
+
+// Enabling a custom JS_GC_ZEAL value for spidermonkey is a two step process:
+// 1) JS_GC_ZEAL preprocessor directive needs to be defined at compilation (spider-monkey-dbg=on).
+// 2) A valid JS_GC_ZEAL value needs to be provided as an environment variable at runtime.
+// In order to detect whether we are running with JS_GC_ZEAL enabled, ideally we'd like to check for
+// the CPPDEFINE for JS_GC_ZEAL. Unfortunately, this CPPDEFINE only applies to libmozjs, and is not
+// exposed in the BuildInfo response. Instead, we rely on detecting a non-empty environment variable
+// for JS_GC_ZEAL. We could have restricted the RegExp to match a valid input for JS_GC_ZEAL
+// For example: RegExp(/^\w+(;\w+)*(,\d+)?$/), but SpiderMonkey performs the validation for us.
+// As long as a non-whitespace JS_GC_ZEAL value has been detected, we report it as being enabled.
+function _isSpiderMonkeyDebugEnabled() {
+    const jsGcZeal = _getEnv("JS_GC_ZEAL");
+    let regex = RegExp(/^\S+$/);
+    return regex.test(jsGcZeal);
 }
 
 jsTestName = function() {

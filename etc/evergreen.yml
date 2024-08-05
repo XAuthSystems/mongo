@@ -44,7 +44,8 @@
 # 2. If your task does not depend on 'archive_dist_test'/'archive_dist_test_debug' task use the following functions
 # call sequence
 # - command: manifest.load
-# - func: "git get project" (clone the entire mongo and enterprise repos)
+# - func: "git get shallow project" (clone the entire mongo and enterprise repos)
+# - func: "restore git history and tags"
 # - func: "f_expansions_write"
 # - func: "kill processes"
 # - func: "cleanup environment"
@@ -69,6 +70,8 @@ include:
   - filename: etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/macos/test_dev_master_branch_only.yml
+
+  - filename: etc/evergreen_yml_components/variants/mongot/test_dev.yml
 
   - filename: etc/evergreen_yml_components/variants/rhel/test_dev.yml
   - filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml

@@ -2406,7 +2406,7 @@ var ReplSetTest = function ReplSetTest(opts) {
                     print("ReplSetTest awaitReplication: caught exception " + e);
 
                     // We might have a new primary now
-                    awaitLastOpTimeWrittenFn();
+                    awaitLastOpTimeWrittenFn(this);
 
                     print("ReplSetTest awaitReplication: resetting: optime for target " + target +
                           " is " + tojson(targetLatestOpTime));
@@ -4053,7 +4053,7 @@ var ReplSetTest = function ReplSetTest(opts) {
             // and too slowly processing heartbeats. When it steps down, it closes all of
             // its connections.
             _constructFromExistingSeedNode(this, opts);
-        }, ReplSetTest.kDefaultRetries);
+        }, ReplSetTest.kDefaultRetries, 1000, [ErrorCodes.NotYetInitialized]);
     } else if (typeof opts.rstArgs === "object") {
         _constructFromExistingNodes(this, Object.extend({}, opts.rstArgs, true));
     } else {

@@ -124,12 +124,6 @@ public:
     }
 
     /**
-     * Calculate the number of documents needed to satisfy a user-defined limit. This information
-     * can be used in a getMore sent to mongot.
-     */
-    boost::optional<long long> calcDocsNeeded();
-
-    /**
      * If a cursor establishment phase was run and returned no documents, make sure we don't later
      * repeat the query to mongot.
      */
@@ -186,6 +180,12 @@ public:
         _searchIdLookupMetrics = std::move(searchIdLookupMetrics);
     }
 
+    std::shared_ptr<DocumentSourceInternalSearchIdLookUp::SearchIdLookupMetrics>
+    getSearchIdLookupMetrics() {
+        // Will be nullptr if query is stored source.
+        return _searchIdLookupMetrics;
+    }
+
 protected:
     /**
      * Helper serialize method that avoids making mongot call during explain from mongos.
@@ -235,10 +235,6 @@ private:
     }
 
     InternalSearchMongotRemoteSpec _spec;
-
-    // If this is an explain of a $search at execution-level verbosity, then the explain
-    // results are held here. Otherwise, this is an empty object.
-    BSONObj _explainResponse;
 
     std::shared_ptr<executor::TaskExecutor> _taskExecutor;
 

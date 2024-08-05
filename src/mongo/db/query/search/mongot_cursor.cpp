@@ -158,11 +158,53 @@ executor::RemoteCommandRequest getRemoteCommandRequest(OperationContext* opCtx,
     doThrowIfNotRunningWithMongotHostConfigured();
     auto swHostAndPort = HostAndPort::parse(globalMongotParams.host);
     // This host and port string is configured and validated at startup.
-    invariant(swHostAndPort.getStatus().isOK());
+    invariant(swHostAndPort.getStatus());
     executor::RemoteCommandRequest rcr(
         executor::RemoteCommandRequest(swHostAndPort.getValue(), nss.dbName(), cmdObj, opCtx));
     rcr.sslMode = transport::ConnectSSLMode::kDisableSSL;
     return rcr;
+}
+// TODO SERVER-91594 makeTaskExecutorCursorForExplain() can be removed when mongot will always
+// return a cursor.
+std::unique_ptr<executor::TaskExecutorCursor> makeTaskExecutorCursorForExplain(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const executor::RemoteCommandRequest& command,
+    std::shared_ptr<executor::TaskExecutor> taskExecutor,
+    std::unique_ptr<executor::TaskExecutorCursorGetMoreStrategy> getMoreStrategy,
+    std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+    // We may potentially query an older version of mongot that doesn't return a cursor object. This
+    // causes an error within makeTaskExecutorCursor() as it expects a cursor. We catch that error
+    // here and then create a dummy TEC to continue execution.
+    try {
+        return makeTaskExecutorCursor(expCtx->opCtx,
+                                      taskExecutor,
+                                      command,
+                                      {std::move(getMoreStrategy), std::move(yieldPolicy)},
+                                      makeRetryOnNetworkErrorPolicy());
+    } catch (ExceptionFor<ErrorCodes::IDLFailedToParse>&) {
+        auto nss = expCtx->ns;
+        BSONObjBuilder createdResponse;
+        createdResponse.append("ok", 1);
+
+        // Note that we do not query mongot here to obtain the explain object for the created cursor
+        // response. This is because the command could include the protocolVersion, and if we happen
+        // to query a version of mongot that does return cursors, we would not be able to easily
+        // obtain the explain object from the response. As there is no explain object on this
+        // created cursor response, the explain object will be obtained during
+        // serializeWithoutMergePipeline() of DocumentSourceInternalSearchMongotRemote.
+        BSONObjBuilder cursor =
+            BSONObjBuilder(createdResponse.subobjStart(CursorInitialReply::kCursorFieldName));
+        cursor.append(AnyCursor::kCursorIdFieldName, CursorId(0));
+        cursor.append(AnyCursor::kNsFieldName,
+                      NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
+        cursor.append(AnyCursor::kFirstBatchFieldName, BSONArray());
+        cursor.doneFast();
+        auto cursorResponse = CursorResponse::parseFromBSON(std::move(createdResponse.obj()));
+
+        return std::make_unique<executor::TaskExecutorCursor>(
+            taskExecutor, nullptr, uassertStatusOK(std::move(cursorResponse)), command);
+    }
+    MONGO_UNREACHABLE;
 }
 
 std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
@@ -172,14 +214,25 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     std::unique_ptr<executor::TaskExecutorCursorGetMoreStrategy> getMoreStrategy,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
     std::vector<std::unique_ptr<executor::TaskExecutorCursor>> cursors;
-    auto initialCursor =
-        makeTaskExecutorCursor(expCtx->opCtx,
-                               taskExecutor,
-                               command,
-                               {std::move(getMoreStrategy), std::move(yieldPolicy)},
-                               makeRetryOnNetworkErrorPolicy());
 
-    auto additionalCursors = initialCursor->releaseAdditionalCursors();
+    std::unique_ptr<executor::TaskExecutorCursor> initialCursor;
+    std::vector<std::unique_ptr<executor::TaskExecutorCursor>> additionalCursors;
+
+    if (expCtx->explain) {
+        tassert(8431800,
+                "Sharded $search queries should not establishCursors() for explain.",
+                !expCtx->needsMerge);
+        initialCursor = makeTaskExecutorCursorForExplain(
+            expCtx, command, taskExecutor, std::move(getMoreStrategy), std::move(yieldPolicy));
+
+    } else {
+        initialCursor = makeTaskExecutorCursor(expCtx->opCtx,
+                                               taskExecutor,
+                                               command,
+                                               {std::move(getMoreStrategy), std::move(yieldPolicy)},
+                                               makeRetryOnNetworkErrorPolicy());
+        additionalCursors = initialCursor->releaseAdditionalCursors();
+    }
     cursors.push_back(std::move(initialCursor));
     // Preserve cursor order. Expect cursors to be labeled, so this may not be necessary.
     for (auto& thisCursor : additionalCursors) {
@@ -194,8 +247,9 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     const InternalSearchMongotRemoteSpec& spec,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     boost::optional<int64_t> userBatchSize,
-    std::function<boost::optional<long long>()> calcDocsNeededFn,
-    std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+    std::unique_ptr<PlanYieldPolicy> yieldPolicy,
+    std::shared_ptr<DocumentSourceInternalSearchIdLookUp::SearchIdLookupMetrics>
+        searchIdLookupMetrics) {
     // UUID is required for mongot queries. If not present, no results for the query as the
     // collection has not been created yet.
     if (!expCtx->uuid) {
@@ -227,8 +281,6 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     if (batchSize.has_value() ||
         !feature_flags::gFeatureFlagSearchBatchSizeLimit.isEnabledAndIgnoreFCVUnsafe()) {
         docsRequested = boost::none;
-        // Set calcDocsNeededFn to disable docsRequested for getMore requests.
-        calcDocsNeededFn = nullptr;
     } else {
         // If we're enabling the docsRequested option, min/max bounds can be set to the
         // docsRequested value.
@@ -238,11 +290,11 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     }
 
     auto getMoreStrategy = std::make_unique<executor::MongotTaskExecutorCursorGetMoreStrategy>(
-        calcDocsNeededFn,
         batchSize,
         bounds.value_or(
             DocsNeededBounds(docs_needed_bounds::Unknown(), docs_needed_bounds::Unknown())),
-        expCtx->ns.tenantId());
+        expCtx->ns.tenantId(),
+        searchIdLookupMetrics);
 
     // If it turns out that this stage is not running on a sharded collection, we don't want
     // to send the protocol version to mongot. If the protocol version is sent, mongot will

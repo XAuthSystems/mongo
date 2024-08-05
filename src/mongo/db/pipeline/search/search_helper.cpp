@@ -325,9 +325,11 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
     prepareSearchPipelineLegacyExecutor(origPipeline, true);
 
     if (expCtx->explain || !isSearchPipeline(origPipeline)) {
-        // $search doesn't return documents or metadata from explain regardless of the verbosity.
-        // $searchMeta or $vectorSearch pipelines won't need an additional pipeline since they
-        // only need one cursor.
+        // TODO SERVER-91828: Enable creation of cursors for sharded search.
+        // For sharded search, we don't return documents or metadata from explain regardless of
+        // the verbosity. Standalone search will establish its cursors later in
+        // internalSearchMongotRemote. $searchMeta or $vectorSearch pipelines won't need an
+        // additional pipeline since they only need one cursor.
         return nullptr;
     }
 
@@ -359,12 +361,13 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
     }
 
     // The search stage has not yet established its cursor on mongoT. Establish the cursor for it.
-    auto cursors = mongot_cursor::establishCursorsForSearchStage(
-        expCtx,
-        origSearchStage->getMongotRemoteSpec(),
-        origSearchStage->getTaskExecutor(),
-        userBatchSize,
-        [origSearchStage] { return origSearchStage->calcDocsNeeded(); });
+    auto cursors =
+        mongot_cursor::establishCursorsForSearchStage(expCtx,
+                                                      origSearchStage->getMongotRemoteSpec(),
+                                                      origSearchStage->getTaskExecutor(),
+                                                      userBatchSize,
+                                                      nullptr,
+                                                      origSearchStage->getSearchIdLookupMetrics());
 
     // mongot can return zero cursors for an empty collection, one without metadata, or two for
     // results and metadata.
@@ -440,12 +443,8 @@ void establishSearchCursorsSBE(boost::intrusive_ptr<ExpressionContext> expCtx,
     auto searchStage = dynamic_cast<mongo::DocumentSourceSearch*>(stage);
     auto executor = executor::getMongotTaskExecutor(expCtx->opCtx->getServiceContext());
 
-    auto cursors = mongot_cursor::establishCursorsForSearchStage(expCtx,
-                                                                 searchStage->getMongotRemoteSpec(),
-                                                                 executor,
-                                                                 boost::none,
-                                                                 nullptr,
-                                                                 std::move(yieldPolicy));
+    auto cursors = mongot_cursor::establishCursorsForSearchStage(
+        expCtx, searchStage->getMongotRemoteSpec(), executor, boost::none, std::move(yieldPolicy));
 
     auto [documentCursor, metaCursor] = parseMongotResponseCursors(std::move(cursors));
 
