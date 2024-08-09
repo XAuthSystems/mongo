@@ -2,11 +2,8 @@ load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
-filegroup(
-    name = "exit_code",
-    srcs = [
-        "exit_code.h",
-    ],
+exports_files(
+    glob(["*.h"]) + glob(["*.cpp"]),
 )
 
 mongo_cc_library(
@@ -16,5 +13,38 @@ mongo_cc_library(
     ],
     hdrs = [
         "boost_assert_shim.h",
+        "//src/third_party/boost:headers",
+    ],
+    copts = [
+        "-Isrc/third_party/boost",
+    ],
+)
+
+mongo_cc_library(
+    name = "debugger",
+    srcs = [
+        "debugger.cpp",
+    ],
+    hdrs = [
+        "debugger.h",
+    ],
+    local_defines = select({
+        "//bazel/config:use_gdbserver_enabled": ["USE_GDBSERVER"],
+        "//bazel/config:use_lldbserver_enabled": ["USE_LLDB_SERVER"],
+        "//bazel/config:use_wait_for_debugger_enabled": ["WAIT_FOR_DEBUGGER"],
+        "//conditions:default": [],
+    }),
+)
+
+mongo_cc_library(
+    name = "winutil",
+    srcs = [
+        "winutil.cpp",
+    ],
+    hdrs = [
+        "winutil.h",
+    ],
+    deps = [
+        "//src/mongo:base",
     ],
 )
