@@ -55,7 +55,6 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -198,38 +197,6 @@ void WiredTigerRecoveryUnit::setPrefetching(bool enable) {
     session->reconfigure(config.str(), "prefetch=(enabled=false)");
 }
 
-bool WiredTigerRecoveryUnit::waitUntilDurable(OperationContext* opCtx) {
-    invariant(!_inUnitOfWork(), toString(_getState()));
-    invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair);
-
-    // Flushes the journal log to disk. Checkpoints all data if journaling is disabled.
-    _sessionCache->waitUntilDurable(opCtx,
-                                    WiredTigerSessionCache::Fsync::kJournal,
-                                    WiredTigerSessionCache::UseJournalListener::kUpdate);
-
-    return true;
-}
-
-bool WiredTigerRecoveryUnit::waitUntilUnjournaledWritesDurable(OperationContext* opCtx,
-                                                               bool stableCheckpoint) {
-    invariant(!_inUnitOfWork(), toString(_getState()));
-    invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair);
-
-    // Take a checkpoint, rather than only flush the (oplog) journal, in order to lock in stable
-    // writes to unjournaled tables.
-    //
-    // If 'stableCheckpoint' is set, then we will only checkpoint data up to and including the
-    // stable_timestamp set on WT at the time of the checkpoint. Otherwise, we will checkpoint all
-    // of the data.
-    WiredTigerSessionCache::Fsync fsyncType = stableCheckpoint
-        ? WiredTigerSessionCache::Fsync::kCheckpointStableTimestamp
-        : WiredTigerSessionCache::Fsync::kCheckpointAll;
-    _sessionCache->waitUntilDurable(
-        opCtx, fsyncType, WiredTigerSessionCache::UseJournalListener::kUpdate);
-
-    return true;
-}
-
 void WiredTigerRecoveryUnit::assertInActiveTxn() const {
     if (_isActive()) {
         return;
@@ -259,6 +226,7 @@ void WiredTigerRecoveryUnit::setOplogVisibilityTs(boost::optional<int64_t> oplog
 
 WiredTigerSession* WiredTigerRecoveryUnit::getSession() {
     if (!_isActive()) {
+        _optionsUsedToOpenSnapshot = kDefaultOpenSnapshotOptions;
         _txnOpen();
         _setState(_inUnitOfWork() ? State::kActive : State::kActiveNotInUnitOfWork);
     }
@@ -280,9 +248,15 @@ void WiredTigerRecoveryUnit::doAbandonSnapshot() {
     _setState(State::kInactive);
 }
 
-void WiredTigerRecoveryUnit::preallocateSnapshot() {
+void WiredTigerRecoveryUnit::preallocateSnapshot(const OpenSnapshotOptions& options) {
     // Begin a new transaction, if one is not already started.
-    getSession();
+    if (!_isActive()) {
+        _optionsUsedToOpenSnapshot = options;
+        _txnOpen();
+        _setState(_inUnitOfWork() ? State::kActive : State::kActiveNotInUnitOfWork);
+    } else {
+        invariant(options == _optionsUsedToOpenSnapshot);
+    }
 }
 
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
@@ -411,7 +385,6 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
     _multiTimestampConstraintTracker = {};
     _prepareTimestamp = Timestamp();
     _durableTimestamp = Timestamp();
-    _roundUpPreparedTimestamps = RoundUpPreparedTimestamps::kNoRound;
     _oplogVisibleTs = boost::none;
     _orderedCommit = true;  // Default value is true; we assume all writes are ordered.
     if (_untimestampedWriteAssertionLevel !=
@@ -437,8 +410,7 @@ Status WiredTigerRecoveryUnit::majorityCommittedSnapshotAvailable() const {
     return Status::OK();
 }
 
-boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
-    OperationContext* opCtx) {
+boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp() {
     // After a ReadSource has been set on this RecoveryUnit, callers expect that this method returns
     // the read timestamp that will be used for current or future transactions. Because callers use
     // this timestamp to inform visibility of operations, it is therefore necessary to open a
@@ -467,8 +439,7 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
             break;
     }
 
-    // Ensure a transaction is opened. Storage engine operations require the global lock.
-    invariant(shard_role_details::getLocker(opCtx)->isLocked());
+    // Ensure a transaction is opened.
     getSession();
 
     switch (_timestampReadSource) {
@@ -514,7 +485,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             _oplogVisibleTs = static_cast<std::int64_t>(_oplogManager->getOplogReadTimestamp());
             WiredTigerBeginTxnBlock(_session,
                                     _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
+                                    _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kNoRoundError,
                                     _untimestampedWriteAssertionLevel)
                 .done();
@@ -523,7 +494,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
         case ReadSource::kCheckpoint: {
             WiredTigerBeginTxnBlock(_session,
                                     _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
+                                    _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kNoRoundError,
                                     _untimestampedWriteAssertionLevel)
                 .done();
@@ -533,7 +504,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             _readAtTimestamp = _sessionCache->snapshotManager().beginTransactionOnCommittedSnapshot(
                 _session,
                 _prepareConflictBehavior,
-                _roundUpPreparedTimestamps,
+                _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                 _untimestampedWriteAssertionLevel);
             break;
         }
@@ -555,7 +526,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
         case ReadSource::kProvided: {
             WiredTigerBeginTxnBlock txnOpen(_session,
                                             _prepareConflictBehavior,
-                                            _roundUpPreparedTimestamps,
+                                            _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                             RoundUpReadTimestamp::kNoRoundError,
                                             _untimestampedWriteAssertionLevel);
             auto status = txnOpen.setReadSnapshot(_readAtTimestamp);
@@ -584,7 +555,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
 Timestamp WiredTigerRecoveryUnit::_beginTransactionAtAllDurableTimestamp() {
     WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
+                                    _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
                                     _untimestampedWriteAssertionLevel);
     Timestamp txnTimestamp = _sessionCache->getKVEngine()->getAllDurableTimestamp();
@@ -612,7 +583,7 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp() {
         // timestamped writes have been made.
         WiredTigerBeginTxnBlock txnOpen(_session,
                                         _prepareConflictBehavior,
-                                        _roundUpPreparedTimestamps,
+                                        _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                         RoundUpReadTimestamp::kNoRoundError,
                                         _untimestampedWriteAssertionLevel);
         LOGV2_DEBUG(4847500, 2, "no read timestamp available for kLastApplied");
@@ -622,7 +593,7 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp() {
 
     WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
+                                    _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
                                     _untimestampedWriteAssertionLevel);
     auto status = txnOpen.setReadSnapshot(_readAtTimestamp);
@@ -636,7 +607,6 @@ void WiredTigerRecoveryUnit::_beginTransactionAtLastAppliedTimestamp() {
 }
 
 Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp() {
-
     auto lastApplied = _sessionCache->snapshotManager().getLastApplied();
     Timestamp allDurable = Timestamp(_sessionCache->getKVEngine()->getAllDurableTimestamp());
 
@@ -678,7 +648,7 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp() {
         // timestamped writes have been made.
         WiredTigerBeginTxnBlock txnOpen(_session,
                                         _prepareConflictBehavior,
-                                        _roundUpPreparedTimestamps,
+                                        _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                         RoundUpReadTimestamp::kNoRoundError,
                                         _untimestampedWriteAssertionLevel);
         LOGV2_DEBUG(4452900, 1, "no read timestamp available for kNoOverlap");
@@ -688,7 +658,7 @@ Timestamp WiredTigerRecoveryUnit::_beginTransactionAtNoOverlapTimestamp() {
 
     WiredTigerBeginTxnBlock txnOpen(_session,
                                     _prepareConflictBehavior,
-                                    _roundUpPreparedTimestamps,
+                                    _optionsUsedToOpenSnapshot.roundUpPreparedTimestamps,
                                     RoundUpReadTimestamp::kRound,
                                     _untimestampedWriteAssertionLevel);
     auto status = txnOpen.setReadSnapshot(readTimestamp);
@@ -850,19 +820,6 @@ void WiredTigerRecoveryUnit::setPrepareConflictBehavior(PrepareConflictBehavior 
 
 PrepareConflictBehavior WiredTigerRecoveryUnit::getPrepareConflictBehavior() const {
     return _prepareConflictBehavior;
-}
-
-void WiredTigerRecoveryUnit::setRoundUpPreparedTimestamps(bool value) {
-    // This cannot be called after WiredTigerRecoveryUnit::_txnOpen.
-    invariant(!_isActive(),
-              str::stream() << "Can't change round up prepared timestamps flag "
-                            << "when current state is " << toString(_getState()));
-    _roundUpPreparedTimestamps =
-        (value) ? RoundUpPreparedTimestamps::kRound : RoundUpPreparedTimestamps::kNoRound;
-}
-
-bool WiredTigerRecoveryUnit::getRoundUpPreparedTimestamps() {
-    return _roundUpPreparedTimestamps == RoundUpPreparedTimestamps::kRound;
 }
 
 void WiredTigerRecoveryUnit::setTimestampReadSource(ReadSource readSource,

@@ -124,8 +124,8 @@ EOF
 ERANGE
 ETIME
 ETIMEDOUT
-EVICTSERVER
 EXTLIST
+EXTLIST's
 EXTSUBPATH
 Encryptor
 Encryptors
@@ -343,6 +343,7 @@ Readonly
 Realloc
 RedHat
 Redistributions
+Reify
 Rogerio
 Runtime
 SDK
@@ -743,7 +744,6 @@ ev
 evd
 eventv
 evictable
-evictserver
 exactp
 exe
 existp
@@ -1062,6 +1062,7 @@ nocase
 noclear
 nocrypto
 noexcept
+noff
 nolock
 nonces
 nonliteral
@@ -1083,6 +1084,7 @@ nullptr
 num
 numbare
 nvram
+objectid
 offpage
 ok
 oldv
@@ -1325,6 +1327,7 @@ tempdir
 testext
 testutil
 th
+throwIfNonZero
 tid
 timespec
 tinfo
@@ -1446,6 +1449,7 @@ whitespace
 wiredTiger
 wiredTigerTables
 wiredtiger
+wiredtigerCleanup
 workgen
 wrapup
 writeable

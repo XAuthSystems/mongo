@@ -920,9 +920,6 @@ void CurOp::reportState(BSONObjBuilder* builder,
         case PlanExecutor::QueryFramework::kSBEHybrid:
             builder->append("queryFramework", "sbe");
             break;
-        case PlanExecutor::QueryFramework::kCQF:
-            builder->append("queryFramework", "cqf");
-            break;
         case PlanExecutor::QueryFramework::kUnknown:
             break;
     }
@@ -1254,9 +1251,6 @@ void OpDebug::report(OperationContext* opCtx,
         case PlanExecutor::QueryFramework::kSBEHybrid:
             pAttrs->add("queryFramework", "sbe");
             break;
-        case PlanExecutor::QueryFramework::kCQF:
-            pAttrs->add("queryFramework", "cqf");
-            break;
         case PlanExecutor::QueryFramework::kUnknown:
             break;
     }
@@ -1414,6 +1408,7 @@ void OpDebug::reportStorageStats(logv2::DynamicAttributes* pAttrs) const {
 void OpDebug::append(OperationContext* opCtx,
                      const SingleThreadedLockStats& lockStats,
                      FlowControlTicketholder::CurOp flowControlStats,
+                     bool omitCommand,
                      BSONObjBuilder& b) const {
     auto& curop = *CurOp::get(opCtx);
 
@@ -1421,13 +1416,15 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.append("ns", curop.getNS());
 
-    appendObjectTruncatingAsNecessary(
-        "command", appendCommentField(opCtx, curop.opDescription()), appendMaxElementSize, b);
-
-    auto originatingCommand = curop.originatingCommand();
-    if (!originatingCommand.isEmpty()) {
+    if (!omitCommand) {
         appendObjectTruncatingAsNecessary(
-            "originatingCommand", originatingCommand, appendMaxElementSize, b);
+            "command", appendCommentField(opCtx, curop.opDescription()), appendMaxElementSize, b);
+
+        auto originatingCommand = curop.originatingCommand();
+        if (!originatingCommand.isEmpty()) {
+            appendObjectTruncatingAsNecessary(
+                "originatingCommand", originatingCommand, appendMaxElementSize, b);
+        }
     }
 
     if (!resolvedViews.empty()) {
@@ -1492,9 +1489,6 @@ void OpDebug::append(OperationContext* opCtx,
         case PlanExecutor::QueryFramework::kSBEOnly:
         case PlanExecutor::QueryFramework::kSBEHybrid:
             b.append("queryFramework", "sbe");
-            break;
-        case PlanExecutor::QueryFramework::kCQF:
-            b.append("queryFramework", "cqf");
             break;
         case PlanExecutor::QueryFramework::kUnknown:
             break;
@@ -1807,9 +1801,6 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
             case PlanExecutor::QueryFramework::kSBEOnly:
             case PlanExecutor::QueryFramework::kSBEHybrid:
                 b.append("queryFramework", "sbe");
-                break;
-            case PlanExecutor::QueryFramework::kCQF:
-                b.append("queryFramework", "cqf");
                 break;
             case PlanExecutor::QueryFramework::kUnknown:
                 break;

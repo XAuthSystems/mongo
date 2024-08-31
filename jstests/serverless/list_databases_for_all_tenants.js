@@ -4,7 +4,7 @@
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {configureFailPoint, kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
-import {makeTenantDB} from "jstests/replsets/libs/tenant_migration_util.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 const kVTSKey = 'secret';
 

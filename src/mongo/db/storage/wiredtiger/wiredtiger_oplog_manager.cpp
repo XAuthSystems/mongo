@@ -69,7 +69,7 @@ MONGO_FAIL_POINT_DEFINE(WTPauseOplogVisibilityUpdateLoop);
 const int kDelayMillis = 100;
 
 void WiredTigerOplogManager::startVisibilityThread(OperationContext* opCtx,
-                                                   WiredTigerRecordStore* oplogRecordStore) {
+                                                   RecordStore* oplogRecordStore) {
     invariant(!_isRunning.loadRelaxed());
     // Prime the oplog read timestamp.
     std::unique_ptr<SeekableRecordCursor> reverseOplogCursor =
@@ -99,10 +99,11 @@ void WiredTigerOplogManager::startVisibilityThread(OperationContext* opCtx,
     // Need to obtain the mutex before starting the thread, as otherwise it may race ahead
     // see _shuttingDown as true and quit prematurely.
     stdx::lock_guard<Latch> lk(_oplogVisibilityStateMutex);
-    _oplogVisibilityThread = stdx::thread(&WiredTigerOplogManager::_updateOplogVisibilityLoop,
-                                          this,
-                                          WiredTigerRecoveryUnit::get(opCtx)->getSessionCache(),
-                                          oplogRecordStore);
+    _oplogVisibilityThread = stdx::thread(
+        &WiredTigerOplogManager::_updateOplogVisibilityLoop,
+        this,
+        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionCache(),
+        oplogRecordStore);
 
     _isRunning.store(true);
     _shuttingDown = false;
@@ -148,7 +149,7 @@ void WiredTigerOplogManager::triggerOplogVisibilityUpdate() {
 }
 
 void WiredTigerOplogManager::waitForAllEarlierOplogWritesToBeVisible(
-    const WiredTigerRecordStore* oplogRecordStore, OperationContext* opCtx) {
+    const RecordStore* oplogRecordStore, OperationContext* opCtx) {
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     // In order to reliably detect rollback situations, we need to fetch the latestVisibleTimestamp
@@ -212,7 +213,7 @@ void WiredTigerOplogManager::waitForAllEarlierOplogWritesToBeVisible(
 }
 
 void WiredTigerOplogManager::_updateOplogVisibilityLoop(WiredTigerSessionCache* sessionCache,
-                                                        WiredTigerRecordStore* oplogRecordStore) {
+                                                        RecordStore* oplogRecordStore) {
     Client::initThread("OplogVisibilityThread",
                        getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 

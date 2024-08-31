@@ -34,32 +34,6 @@
     LOGV2_DEBUG_OPTIONS(                             \
         ID, DLEVEL, {logv2::LogComponent::kReplicationRollback}, MESSAGE, ##__VA_ARGS__)
 
-#include "mongo/base/checked_cast.h"
-#include "mongo/base/parse_number.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/db/catalog/collection_options_gen.h"
-#include "mongo/db/index_names.h"
-#include "mongo/db/repl/member_state.h"
-#include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/db/server_parameter.h"
-#include "mongo/db/storage/backup_block.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/platform/atomic_proxy.h"
-#include "mongo/platform/compiler.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/exit_code.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/str.h"
-#include "mongo/util/uuid.h"
-#include "mongo/util/version/releases.h"
-
 #ifdef _WIN32
 #define NVALGRIND
 #endif
@@ -90,19 +64,30 @@
 #include <sstream>
 #include <utility>
 
+#include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/base/parse_number.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/collection_options_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/query/bson/dotted_path_support.h"
+#include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/server_parameter.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/snapshot_window_options_gen.h"
+#include "mongo/db/storage/backup_block.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/storage_file_util.h"
@@ -116,6 +101,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
@@ -124,15 +110,28 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/platform/atomic_proxy.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/exit_code.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+#include "mongo/util/version/releases.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -144,11 +143,8 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(WTDropEBUSY);
-MONGO_FAIL_POINT_DEFINE(WTPauseStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(WTPreserveSnapshotHistoryIndefinitely);
 MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
-MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportCollection);
-MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportIndex);
 MONGO_FAIL_POINT_DEFINE(WTRollbackToStableReturnOnEBUSY);
 MONGO_FAIL_POINT_DEFINE(hangBeforeUnrecoverableRollbackError);
 MONGO_FAIL_POINT_DEFINE(WTDisableFastShutDown);
@@ -840,12 +836,14 @@ void WiredTigerKVEngine::cleanShutdown() {
 }
 
 int64_t WiredTigerKVEngine::getIdentSize(OperationContext* opCtx, StringData ident) {
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession();
+    WiredTigerSession* session =
+        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSession();
     return WiredTigerUtil::getIdentSize(session->getSession(), _uri(ident));
 }
 
 Status WiredTigerKVEngine::repairIdent(OperationContext* opCtx, StringData ident) {
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession();
+    WiredTigerSession* session =
+        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSession();
     string uri = _uri(ident);
     session->closeAllCursors(uri);
     _sessionCache->closeAllCursors(uri);
@@ -990,17 +988,14 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
     syncSizeInfo(true);
 
     // If there's no journal (ephemeral), we must checkpoint all of the data.
-    WiredTigerSessionCache::Fsync fsyncType = !_ephemeral
-        ? WiredTigerSessionCache::Fsync::kCheckpointStableTimestamp
-        : WiredTigerSessionCache::Fsync::kCheckpointAll;
+    Fsync fsyncType = !_ephemeral ? Fsync::kCheckpointStableTimestamp : Fsync::kCheckpointAll;
 
     // We will skip updating the journal listener if the caller holds read locks.
     // The JournalListener may do writes, and taking write locks would conflict with the read locks.
-    WiredTigerSessionCache::UseJournalListener useListener = callerHoldsReadLock
-        ? WiredTigerSessionCache::UseJournalListener::kSkip
-        : WiredTigerSessionCache::UseJournalListener::kUpdate;
+    UseJournalListener useListener =
+        callerHoldsReadLock ? UseJournalListener::kSkip : UseJournalListener::kUpdate;
 
-    _sessionCache->waitUntilDurable(opCtx, fsyncType, useListener);
+    waitUntilDurable(opCtx, fsyncType, useListener);
 }
 
 Status WiredTigerKVEngine::beginBackup(OperationContext* opCtx) {
@@ -1503,16 +1498,6 @@ Status WiredTigerKVEngine::importRecordStore(OperationContext* opCtx,
     _ensureIdentPath(ident);
     WiredTigerSession session(_conn);
 
-    if (MONGO_unlikely(WTWriteConflictExceptionForImportCollection.shouldFail())) {
-        LOGV2(6177300,
-              "Failpoint WTWriteConflictExceptionForImportCollection enabled. Throwing "
-              "WriteConflictException",
-              "ident"_attr = ident);
-        throwWriteConflictException(
-            str::stream() << "Hit failpoint '"
-                          << WTWriteConflictExceptionForImportCollection.getName() << "'.");
-    }
-
     std::string config = uassertStatusOK(
         WiredTigerUtil::generateImportString(ident, storageMetadata, importOptions));
 
@@ -1708,16 +1693,6 @@ Status WiredTigerKVEngine::importSortedDataInterface(OperationContext* opCtx,
                                                      const ImportOptions& importOptions) {
     _ensureIdentPath(ident);
 
-    if (MONGO_unlikely(WTWriteConflictExceptionForImportIndex.shouldFail())) {
-        LOGV2(6177301,
-              "Failpoint WTWriteConflictExceptionForImportIndex enabled. Throwing "
-              "WriteConflictException",
-              "ident"_attr = ident);
-        throwWriteConflictException(str::stream()
-                                    << "Hit failpoint '"
-                                    << WTWriteConflictExceptionForImportIndex.getName() << "'.");
-    }
-
     std::string config = uassertStatusOK(
         WiredTigerUtil::generateImportString(ident, storageMetadata, importOptions));
 
@@ -1875,7 +1850,7 @@ void WiredTigerKVEngine::alterIdentMetadata(OperationContext* opCtx,
         // of version 11 and 12. This is extra defensive and can be reconsidered if we expand the
         // use of 'alterIdentMetadata()' to also modify non-data-format properties.
         invariant(!WiredTigerUtil::checkApplicationMetadataFormatVersion(
-                       *WiredTigerRecoveryUnit::get(opCtx),
+                       *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
                        uri,
                        kDataFormatV3KeyStringV0UniqueIndexVersionV1,
                        kDataFormatV4KeyStringV1UniqueIndexVersionV2)
@@ -2107,7 +2082,10 @@ void WiredTigerKVEngine::forceCheckpoint(bool useStableTimestamp) {
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
-    return _hasUri(WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession(), _uri(ident));
+    return _hasUri(WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
+                       ->getSession()
+                       ->getSession(),
+                   _uri(ident));
 }
 
 bool WiredTigerKVEngine::_hasUri(WT_SESSION* session, const std::string& uri) const {
@@ -2128,10 +2106,11 @@ std::vector<std::string> WiredTigerKVEngine::getAllIdents(OperationContext* opCt
     std::vector<std::string> all;
     int ret;
     // No need for a metadata:create cursor, since it gathers extra information and is slower.
-    WiredTigerCursor cursor(*WiredTigerRecoveryUnit::get(opCtx),
-                            "metadata:",
-                            WiredTigerSession::kMetadataTableId,
-                            false);
+    WiredTigerCursor cursor(
+        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
+        "metadata:",
+        WiredTigerSession::kMetadataTableId,
+        false);
     WT_CURSOR* c = cursor.get();
     if (!c)
         return all;
@@ -2201,14 +2180,16 @@ void WiredTigerKVEngine::_ensureIdentPath(StringData ident) {
 }
 
 void WiredTigerKVEngine::setJournalListener(JournalListener* jl) {
-    return _sessionCache->setJournalListener(jl);
+    stdx::unique_lock<Latch> lk(_journalListenerMutex);
+
+    // A JournalListener can only be set once. Otherwise, accessing a copy of the _journalListener
+    // pointer without a mutex would be unsafe.
+    invariant(!_journalListener);
+
+    _journalListener = jl;
 }
 
 void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp, bool force) {
-    if (MONGO_unlikely(WTPauseStableTimestamp.shouldFail())) {
-        return;
-    }
-
     if (stableTimestamp.isNull()) {
         return;
     }
@@ -2706,6 +2687,216 @@ void WiredTigerKVEngine::haltOplogManager(WiredTigerRecordStore* oplogRecordStor
     }
 }
 
+Status WiredTigerKVEngine::oplogDiskLocRegister(OperationContext* opCtx,
+                                                RecordStore* oplogRecordStore,
+                                                const Timestamp& opTime,
+                                                bool orderedCommit) {
+    // Callers should be updating visibility as part of a write operation. We want to ensure that
+    // we never get here while holding an uninterruptible, read-ticketed lock. That would indicate
+    // that we are operating with the wrong global lock semantics, and either hold too weak a lock
+    // (e.g. IS) or that we upgraded in a way we shouldn't (e.g. IS -> IX).
+    invariant(!shard_role_details::getLocker(opCtx)->hasReadTicket() ||
+              !opCtx->uninterruptibleLocksRequested_DO_NOT_USE());  // NOLINT
+
+    shard_role_details::getRecoveryUnit(opCtx)->setOrderedCommit(orderedCommit);
+
+    if (!orderedCommit) {
+        // This labels the current transaction with a timestamp.
+        // This is required for oplog visibility to work correctly, as WiredTiger uses the
+        // transaction list to determine where there are holes in the oplog.
+        return shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(opTime);
+    }
+
+    // This handles non-primary (secondary) state behavior; we simply set the oplog visiblity read
+    // timestamp here, as there cannot be visible holes prior to the opTime passed in.
+    getOplogManager()->setOplogReadTimestamp(opTime);
+
+    // Inserts and updates usually notify waiters on commit, but the oplog collection has special
+    // visibility rules and waiters must be notified whenever the oplog read timestamp is forwarded.
+    oplogRecordStore->notifyCappedWaitersIfNeeded();
+    return Status::OK();
+}
+
+void WiredTigerKVEngine::waitForAllEarlierOplogWritesToBeVisible(
+    OperationContext* opCtx, RecordStore* oplogRecordStore) const {
+    // Callers are waiting for other operations to finish updating visibility. We want to ensure
+    // that we never get here while holding an uninterruptible, write-ticketed lock. That could
+    // indicate we are holding a stronger lock than we need to, and that we could actually
+    // contribute to ticket-exhaustion. That could prevent the write we are waiting on from
+    // acquiring the lock it needs to update the oplog visibility.
+    invariant(!shard_role_details::getLocker(opCtx)->hasWriteTicket() ||
+              !opCtx->uninterruptibleLocksRequested_DO_NOT_USE());  // NOLINT
+
+    // Make sure that callers do not hold an active snapshot so it will be able to see the oplog
+    // entries it waited for afterwards.
+    if (shard_role_details::getRecoveryUnit(opCtx)->isActive()) {
+        shard_role_details::getLocker(opCtx)->dump();
+        invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive(),
+                  str::stream() << "Unexpected open storage txn. RecoveryUnit state: "
+                                << RecoveryUnit::toString(
+                                       shard_role_details::getRecoveryUnit(opCtx)->getState())
+                                << ", inMultiDocumentTransaction:"
+                                << (opCtx->inMultiDocumentTransaction() ? "true" : "false"));
+    }
+
+    auto oplogManager = getOplogManager();
+    if (oplogManager->isRunning()) {
+        oplogManager->waitForAllEarlierOplogWritesToBeVisible(
+            checked_cast<WiredTigerRecordStore*>(oplogRecordStore), opCtx);
+    }
+}
+
+bool WiredTigerKVEngine::waitUntilDurable(OperationContext* opCtx) {
+    invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive(),
+              str::stream() << "Unexpected open storage txn. RecoveryUnit state: "
+                            << RecoveryUnit::toString(
+                                   shard_role_details::getRecoveryUnit(opCtx)->getState())
+                            << ", inMultiDocumentTransaction:"
+                            << (opCtx->inMultiDocumentTransaction() ? "true" : "false"));
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair);
+
+    // Flushes the journal log to disk. Checkpoints all data if journaling is disabled.
+    waitUntilDurable(opCtx, Fsync::kJournal, UseJournalListener::kUpdate);
+    return true;
+}
+
+bool WiredTigerKVEngine::waitUntilUnjournaledWritesDurable(OperationContext* opCtx,
+                                                           bool stableCheckpoint) {
+    invariant(!shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork(),
+              str::stream() << "Unexpected open storage txn. RecoveryUnit state: "
+                            << RecoveryUnit::toString(
+                                   shard_role_details::getRecoveryUnit(opCtx)->getState())
+                            << ", inMultiDocumentTransaction:"
+                            << (opCtx->inMultiDocumentTransaction() ? "true" : "false"));
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair);
+
+    // Take a checkpoint, rather than only flush the (oplog) journal, in order to lock in stable
+    // writes to unjournaled tables.
+    //
+    // If 'stableCheckpoint' is set, then we will only checkpoint data up to and including the
+    // stable_timestamp set on WT at the time of the checkpoint. Otherwise, we will checkpoint all
+    // of the data.
+    Fsync fsyncType = stableCheckpoint ? Fsync::kCheckpointStableTimestamp : Fsync::kCheckpointAll;
+    waitUntilDurable(opCtx, fsyncType, UseJournalListener::kUpdate);
+
+    return true;
+}
+
+void WiredTigerKVEngine::waitUntilDurable(OperationContext* opCtx,
+                                          Fsync syncType,
+                                          UseJournalListener useListener) {
+    // For inMemory storage engines, the data is "as durable as it's going to get".
+    // That is, a restart is equivalent to a complete node failure.
+    if (isEphemeral()) {
+        auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
+        if (token) {
+            journalListener->onDurable(token.value());
+        }
+        return;
+    }
+
+    WiredTigerSessionCache::BlockShutdown blockShutdown(_sessionCache.get());
+
+    uassert(ErrorCodes::ShutdownInProgress,
+            "Cannot wait for durability because a shutdown is in progress",
+            !_sessionCache->isShuttingDown());
+
+    // Stable checkpoints are only meaningful in a replica set. Replication sets the "stable
+    // timestamp". If the stable timestamp is unset, WiredTiger takes a full checkpoint, which is
+    // incidentally what we want. A "true" stable checkpoint (a stable timestamp was set on the
+    // WT_CONNECTION, i.e: replication is on) requires `forceCheckpoint` to be true and journaling
+    // to be enabled.
+    if (syncType == Fsync::kCheckpointStableTimestamp && getGlobalReplSettings().isReplSet()) {
+        invariant(!isEphemeral());
+    }
+
+    // When forcing a checkpoint with journaling enabled, don't synchronize with other
+    // waiters, as a log flush is much cheaper than a full checkpoint.
+    if ((syncType == Fsync::kCheckpointStableTimestamp || syncType == Fsync::kCheckpointAll) &&
+        !isEphemeral()) {
+        auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
+
+        forceCheckpoint(syncType == Fsync::kCheckpointStableTimestamp);
+
+        if (token) {
+            journalListener->onDurable(token.value());
+        }
+
+        LOGV2_DEBUG(22418, 4, "created checkpoint (forced)");
+        return;
+    }
+
+    auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
+
+    uint32_t start = _lastSyncTime.load();
+    // Do the remainder in a critical section that ensures only a single thread at a time
+    // will attempt to synchronize.
+    stdx::unique_lock<Latch> lk(_lastSyncMutex);
+    uint32_t current = _lastSyncTime.loadRelaxed();  // synchronized with writes through mutex
+    if (current != start) {
+        // Someone else synced already since we read lastSyncTime, so we're done!
+
+        // Unconditionally unlock mutex here to run operations that do not require synchronization.
+        // The JournalListener is the only operation that meets this criteria currently.
+        lk.unlock();
+        if (token) {
+            journalListener->onDurable(token.value());
+        }
+
+        return;
+    }
+    _lastSyncTime.store(current + 1);
+
+    // Nobody has synched yet, so we have to sync ourselves.
+
+    // Initialize on first use.
+    if (!_waitUntilDurableSession) {
+        invariantWTOK(
+            _conn->open_session(_conn, nullptr, "isolation=snapshot", &_waitUntilDurableSession),
+            nullptr);
+    }
+
+    // Flush the journal.
+    invariantWTOK(_waitUntilDurableSession->log_flush(_waitUntilDurableSession, "sync=on"),
+                  _waitUntilDurableSession);
+    LOGV2_DEBUG(22419, 4, "flushed journal");
+
+    // The session is reset periodically so that WT doesn't consider it a rogue session and log
+    // about it. The session doesn't actually pin any resources that need to be released.
+    if (_timeSinceLastDurabilitySessionReset.millis() > (5 * 60 * 1000 /* 5 minutes */)) {
+        _waitUntilDurableSession->reset(_waitUntilDurableSession);
+        _timeSinceLastDurabilitySessionReset.reset();
+    }
+
+    // Unconditionally unlock mutex here to run operations that do not require synchronization.
+    // The JournalListener is the only operation that meets this criteria currently.
+    lk.unlock();
+    if (token) {
+        journalListener->onDurable(token.value());
+    }
+}
+
+std::pair<JournalListener*, boost::optional<JournalListener::Token>>
+WiredTigerKVEngine::_getJournalListenerWithToken(OperationContext* opCtx,
+                                                 UseJournalListener useListener) {
+    auto journalListener = [&]() -> JournalListener* {
+        // The JournalListener may not be set immediately, so we must check under a mutex so
+        // as not to access the variable while setting a JournalListener. A JournalListener
+        // is only allowed to be set once, so using the pointer outside of a mutex is safe.
+        stdx::unique_lock<Latch> lk(_journalListenerMutex);
+        return _journalListener;
+    }();
+    boost::optional<JournalListener::Token> token;
+    if (journalListener && useListener == UseJournalListener::kUpdate) {
+        // Update a persisted value with the latest write timestamp that is safe across
+        // startup recovery in the repl layer. Then report that timestamp as durable to the
+        // repl layer below after we have flushed in-memory data to disk.
+        // Note: only does a write if primary, otherwise just fetches the timestamp.
+        token = journalListener->getToken(opCtx);
+    }
+    return std::make_pair(journalListener, token);
+}
+
 Timestamp WiredTigerKVEngine::getStableTimestamp() const {
     return Timestamp(_stableTimestamp.load());
 }
@@ -2764,7 +2955,8 @@ StatusWith<BSONObj> WiredTigerKVEngine::getStorageMetadata(StringData ident) con
 KeyFormat WiredTigerKVEngine::getKeyFormat(OperationContext* opCtx, StringData ident) const {
 
     const std::string wtTableConfig = uassertStatusOK(WiredTigerUtil::getMetadataCreate(
-        *WiredTigerRecoveryUnit::get(opCtx), "table:{}"_format(ident)));
+        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
+        "table:{}"_format(ident)));
     return wtTableConfig.find("key_format=u") != string::npos ? KeyFormat::String : KeyFormat::Long;
 }
 
@@ -2823,7 +3015,9 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx, const AutoCompac
         config << "background=false";
     }
 
-    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn()->getSession();
+    WT_SESSION* s = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
+                        ->getSessionNoTxn()
+                        ->getSession();
     int ret = s->compact(s, nullptr, config.str().c_str());
     status = wtRCToStatus(
         ret, s, "Failed to configure auto compact, please double check it is not already enabled.");

@@ -14,7 +14,7 @@ variables:
   - &task_template
     name: template
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -36,7 +36,7 @@ variables:
         # This is added because of EVG-18211.
         # Without this we are adding extra dependencies on evergreen and it is causing strain
         omit_generated_tasks: true
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
     commands:
       - func: "generate resmoke tasks"
         vars:
@@ -99,7 +99,7 @@ variables:
         # This is added because of EVG-18211.
         # Without this we are adding extra dependencies on evergreen and it is causing strain
         omit_generated_tasks: true
-      - archive_dist_test_debug
+      - archive_dist_test
     commands:
       - func: "generate resmoke tasks"
 
@@ -562,14 +562,22 @@ tasks:
 
   - <<: *task_template
     name: change_streams_multitenant_passthrough
-    tags: ["assigned_to_jira_team_server_query_execution", "default"] # TODO SERVER-57866: Add the "change_streams" tag here.
+    tags: [
+        "assigned_to_jira_team_server_query_execution",
+        "experimental",
+        "serverless",
+      ] # TODO SERVER-57866: Add the "change_streams" tag here.
     commands:
       - func: "do setup"
       - func: "run tests"
 
   - <<: *task_template
     name: change_streams_multitenant_sharded_collections_passthrough
-    tags: ["assigned_to_jira_team_server_query_execution", "default"] # TODO SERVER-57866: Add the "change_streams" tag here.
+    tags: [
+        "assigned_to_jira_team_server_query_execution",
+        "experimental",
+        "serverless",
+      ] # TODO SERVER-57866: Add the "change_streams" tag here.
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -845,12 +853,12 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
-        "release_critical",
         "incompatible_mac",
         "incompatible_ppc",
         "incompatible_s390x",
         "incompatible_debug_mode",
         "jstestfuzz",
+        "non_deterministic",
         "common",
         "require_npm",
         "random_name",
@@ -1062,9 +1070,8 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           <<: *jstestfuzz_config_vars
-          num_files: 20
-          num_tasks: 20
-          jstestfuzz_vars: --useEsModules
+          num_files: 10
+          num_tasks: 40
           npm_command: update-fuzzer
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
           run_no_feature_flag_tests: "true"
@@ -1092,9 +1099,8 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           <<: *jstestfuzz_config_vars
-          num_files: 20
-          num_tasks: 20
-          jstestfuzz_vars: --useEsModules
+          num_files: 10
+          num_tasks: 40
           npm_command: update-fuzzer
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
           run_no_feature_flag_tests: "true"
@@ -1115,9 +1121,9 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           <<: *jstestfuzz_config_vars
-          num_files: 20
-          num_tasks: 20
-          jstestfuzz_vars: --diffTestingMode timeseries --useEsModules
+          num_files: 10
+          num_tasks: 40
+          jstestfuzz_vars: --diffTestingMode timeseries
           npm_command: update-fuzzer
           suite: generational_fuzzer
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -1252,29 +1258,6 @@ tasks:
           exec_timeout_secs: 18000 # 5 hour timeout.
           resmoke_jobs_max: 1
 
-  # Disabled under SERVER-64949.
-  # - <<: *benchmark_template
-  #   name: benchmarks_cst
-  #   tags: ["assigned_to_jira_team_server_query_optimization", "experimental, "benchmarks"]
-  #   commands:
-  #   - func: "do benchmark setup"
-  #   - func: "run benchmark tests"
-  #     vars:
-  #       suite: benchmarks_cst
-  #       resmoke_jobs_max: 1
-
-  - <<: *task_template
-    name: cst_jscore_passthrough
-    tags:
-      [
-        "assigned_to_jira_team_server_query_optimization",
-        "experimental",
-        "jscore",
-      ]
-    commands:
-      - func: "do setup"
-      - func: "run tests"
-
   ## Standalone generational fuzzer for checking optimized and unoptimized change stream pipelines ##
   - <<: *jstestfuzz_template
     name: change_stream_optimization_fuzzer_gen
@@ -1305,7 +1288,8 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_query_optimization",
-        "non_deterministic",
+        "experimental",
+        "serverless",
         "change_stream_fuzzer",
         "require_npm",
         "random_name",
@@ -1329,7 +1313,8 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_query_optimization",
-        "non_deterministic",
+        "experimental",
+        "serverless",
         "change_stream_fuzzer",
         "require_npm",
         "random_name",
@@ -1378,45 +1363,18 @@ tasks:
         vars:
           suite: query_golden_classic
 
-  ################################################
-  #           Query Integration tasks            #
-  ################################################
-
   - <<: *task_template
-    name: aggregation_column_store_index_passthrough
-    # TODO SERVER-75026 Remove the 'feature_flag_guarded' tag and ensure this suite is run on all
-    # variants.
-    tags:
-      [
-        "assigned_to_jira_team_server_query_integration",
-        "default",
-        "requires_all_feature_flags",
-        "aggregation",
-        "sbe_only",
-        "feature_flag_guarded",
-      ]
-    depends_on:
-      - name: aggregation
+    name: query_golden_sharding
+    tags: ["assigned_to_jira_team_server_query_optimization", "default"]
     commands:
       - func: "do setup"
       - func: "run tests"
+        vars:
+          suite: query_golden_sharding
 
-  # Disabled under SERVER-81088
-  # ## Standalone fuzzer for checking columnstore index correctness ##
-  # - <<: *jstestfuzz_template
-  #   name: aggregation_columnstore_fuzzer_gen
-  #   tags: ["assigned_to_jira_team_server_query_integration", "non_deterministic", "requires_all_feature_flags", "aggfuzzer", "common", "columnstore", "require_npm", "random_name", "sbe_only", "feature_flag_guarded"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       <<: *jstestfuzz_config_vars
-  #       num_files: 20
-  #       num_tasks: 20
-  #       jstestfuzz_vars: --diffTestingMode columnstore
-  #       npm_command: agg-fuzzer
-  #       suite: generational_fuzzer
-  #       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
+  ################################################
+  #           Query Integration tasks            #
+  ################################################
   - <<: *benchmark_template
     name: benchmarks_query
     tags:
@@ -1431,27 +1389,6 @@ tasks:
         vars:
           suite: benchmarks_query
           resmoke_jobs_max: 1
-
-  - <<: *task_template
-    name: jsCore_column_store_indexes
-    # TODO SERVER-75026 Remove the 'feature_flag_guarded' tag and ensure this suite is run on all
-    # variants.
-    depends_on:
-      - name: jsCore
-    tags:
-      [
-        "assigned_to_jira_team_server_query_integration",
-        "default",
-        "requires_all_feature_flags",
-        "jscore",
-        "sbe_only",
-        "feature_flag_guarded",
-      ]
-    commands:
-      - func: "do setup"
-      - func: "run tests"
-        vars:
-          suite: core_column_store_indexes
 
   - <<: *task_template
     name: query_stats_aggregation_passthrough

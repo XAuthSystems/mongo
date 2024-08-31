@@ -37,6 +37,7 @@ const conn = db.getMongo();
 const topology = DiscoverTopology.findConnectedNodes(conn);
 
 async function checkReplDbhashBackgroundThread(hosts) {
+    const {ReplSetTest} = await import("jstests/libs/replsettest.js");
     const {RetryableWritesUtil} = await import("jstests/libs/retryable_writes_util.js");
 
     let debugInfo = [];
@@ -114,8 +115,7 @@ async function checkReplDbhashBackgroundThread(hosts) {
         const dbNoSession = session.getClient().getDB('admin');
 
         const cmdObj = multitenancy ? {listDatabasesForAllTenants: 1} : {listDatabases: 1};
-        const res =
-            assert.commandWorked(RetryableWritesUtil.runCommandWithRetries(dbNoSession, cmdObj));
+        const res = RetryableWritesUtil.runCommandWithRetries(dbNoSession, cmdObj);
         for (let dbInfo of res.databases) {
             const key = `${dbInfo.tenantId}_${dbInfo.name}`;
             const obj = {name: dbInfo.name, tenant: dbInfo.tenantId};

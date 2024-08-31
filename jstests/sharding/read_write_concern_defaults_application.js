@@ -32,6 +32,8 @@
  * ]
  */
 import {profilerHasSingleMatchingEntryOrThrow} from "jstests/libs/profiler.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     commandsRemovedFromMongodSinceLastLTS
 } from "jstests/sharding/libs/last_lts_mongod_commands.js";
@@ -967,8 +969,7 @@ function runScenario(
             return;
         }
 
-        const isMultiversion = jsTest.options().shardMixedBinVersions ||
-            jsTest.options().useRandomBinVersionsWithinReplicaSet;
+        const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
         if (isMultiversion && test.skipMultiversion) {
             print("skipping " + cmdName + " since we are in a multiversion suite.");
             return;

@@ -12,6 +12,8 @@
 import "jstests/multiVersion/libs/multi_rs.js";
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {reconfig} from "jstests/replsets/rslib.js";
 
 function createUser(rst) {
@@ -120,8 +122,7 @@ if (isShardSvrRst) {
     }, tmpTestData);
 }
 
-const isMultiversion =
-    jsTest.options().shardMixedBinVersions || jsTest.options().useRandomBinVersionsWithinReplicaSet;
+const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
 
 for (let session of sessions) {
     // Reconnect and re-authenticate after the network connection was closed due to restart.

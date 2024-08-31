@@ -6,14 +6,18 @@
  *    multiversion_incompatible,
  *    # TODO (SERVER-88126): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
+ *    # TODO (SERVER-94095): Re-enable this test in aubsan and tsan once DEVPROD-10102 is resolved.
+ *    incompatible_aubsan,
+ *    incompatible_tsan,
  * ]
  */
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {reconfig} from "jstests/replsets/rslib.js";
 
 const kActiveFaultDurationSec = 12;
 
 // Crashed mongos will remain holding its socket as a zombie for some time.
-TestData.failIfUnterminatedProcesses = false;
+TestData.ignoreUnterminatedProcesses = true;
 
 // Checking index consistency involves talking to the primary config server which is blackholed from
 // the mongos in this test.

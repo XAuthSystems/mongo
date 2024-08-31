@@ -7,6 +7,7 @@ TestData.disableImplicitSessions = true;
 
 import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Replica set nodes started with --shardsvr do not enable key generation until they are added
 // to a sharded cluster and reject commands with gossiped clusterTime from users without the
@@ -211,8 +212,7 @@ var checkWriteOps = function(hasWriteAuth) {
 };
 
 var checkAdminOps = function(hasAuth) {
-    const isMultiversion = jsTest.options().shardMixedBinVersions ||
-        jsTest.options().useRandomBinVersionsWithinReplicaSet;
+    const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
     if (hasAuth) {
         checkCommandSucceeded(adminDB, {getCmdLineOpts: 1});
         checkCommandSucceeded(adminDB, {serverStatus: 1});

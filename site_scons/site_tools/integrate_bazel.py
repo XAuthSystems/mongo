@@ -149,9 +149,49 @@ def bazel_builder_action(
     # now copy all the targets out to the scons tree, note that target is a
     # list of nodes so we need to stringify it for copyfile
     for t in target:
-        s = Globals.bazel_output(t)
-        shutil.copy(s, str(t))
-        os.chmod(str(t), os.stat(str(t)).st_mode | stat.S_IWUSR)
+        dSYM_found = False
+        if ".dSYM/" in str(t):
+            # ignore dSYM plist file, as we skipped it prior
+            if str(t).endswith(".plist"):
+                continue
+
+            dSYM_found = True
+
+        if dSYM_found:
+            # Here we handle the difference between scons and bazel for dSYM dirs. SCons uses list
+            # actions to perform operations on the same target during some action. Bazel does not
+            # have an exact corresponding feature. Each action in bazel should have unique inputs and
+            # outputs. The file and targets wont line up exactly between scons and our mongo_cc_library,
+            # custom rule, specifically the way dsymutil generates the dwarf file inside the dSYM dir. So
+            # we remap the special filename suffixes we use for our bazel intermediate cc_library rules.
+            #
+            # So we will do the renaming of dwarf file to what scons expects here, before we copy to scons tree
+            substring_end = str(t).find(".dSYM/") + 5
+            t = str(t)[:substring_end]
+            s = Globals.bazel_output(t)
+            dwarf_info_base = os.path.splitext(os.path.splitext(os.path.basename(t))[0])[0]
+            dwarf_sym_with_debug = os.path.join(
+                s, f"Contents/Resources/DWARF/{dwarf_info_base}_shared_with_debug.dylib"
+            )
+
+            # this handles shared libs or program binaries
+            if os.path.exists(dwarf_sym_with_debug):
+                dwarf_sym = os.path.join(s, f"Contents/Resources/DWARF/{dwarf_info_base}.dylib")
+            else:
+                dwarf_sym_with_debug = os.path.join(
+                    s, f"Contents/Resources/DWARF/{dwarf_info_base}_with_debug"
+                )
+                dwarf_sym = os.path.join(s, f"Contents/Resources/DWARF/{dwarf_info_base}")
+            # rename the file for scons
+            shutil.copy(dwarf_sym_with_debug, dwarf_sym)
+
+            # copy the whole dSYM in one operation. Clean any existing files that might be in the way.
+            shutil.rmtree(str(t), ignore_errors=True)
+            shutil.copytree(s, str(t))
+        else:
+            s = Globals.bazel_output(t)
+            shutil.copy(s, str(t))
+            os.chmod(str(t), os.stat(str(t)).st_mode | stat.S_IWUSR)
 
 
 BazelCopyOutputsAction = SCons.Action.FunctionAction(
@@ -386,6 +426,15 @@ def create_program_builder(env: SCons.Environment.Environment) -> None:
     env["BUILDERS"]["BazelProgram"] = create_bazel_builder(env["BUILDERS"]["Program"])
 
 
+def get_default_cert_dir():
+    if platform.system() == "Windows":
+        return f"C:/cygwin/home/{getpass.getuser()}/.engflow"
+    elif platform.system() == "Linux":
+        return f"/home/{getpass.getuser()}/.engflow"
+    elif platform.system() == "Darwin":
+        return f"{os.path.expanduser('~')}/.engflow"
+
+
 def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
     running_in_evergreen = os.environ.get("CI")
 
@@ -395,8 +444,15 @@ def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
         )
         return False
 
+    if os.name == "nt" and not os.path.exists(f"{os.path.expanduser('~')}/.bazelrc"):
+        with open(f"{os.path.expanduser('~')}/.bazelrc", "a") as bazelrc:
+            bazelrc.write(
+                f"build --tls_client_certificate={get_default_cert_dir()}/creds/engflow.crt\n"
+            )
+            bazelrc.write(f"build --tls_client_key={get_default_cert_dir()}/creds/engflow.key\n")
+
     if not running_in_evergreen and not os.path.exists(
-        f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt"
+        f"{get_default_cert_dir()}/creds/engflow.crt"
     ):
         # Temporary logic to copy over the credentials for users that ran the installation steps using the old directory (/engflow/).
         if os.path.exists("/engflow/creds/engflow.crt") and os.path.exists(
@@ -406,21 +462,21 @@ def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
                 "Moving EngFlow credentials from the legacy directory (/engflow/) to the new directory (~/.engflow/)."
             )
             try:
-                os.makedirs(f"/home/{getpass.getuser()}/.engflow/creds/", exist_ok=True)
+                os.makedirs(f"{get_default_cert_dir()}/creds/", exist_ok=True)
                 shutil.move(
                     "/engflow/creds/engflow.crt",
-                    f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt",
+                    f"{get_default_cert_dir()}/creds/engflow.crt",
                 )
                 shutil.move(
                     "/engflow/creds/engflow.key",
-                    f"/home/{getpass.getuser()}/.engflow/creds/engflow.key",
+                    f"{get_default_cert_dir()}/creds/engflow.key",
                 )
-                with open(f"/home/{getpass.getuser()}/.bazelrc", "a") as bazelrc:
+                with open(f"{get_default_cert_dir()}/.bazelrc", "a") as bazelrc:
                     bazelrc.write(
-                        f"build --tls_client_certificate=/home/{getpass.getuser()}/.engflow/creds/engflow.crt\n"
+                        f"build --tls_client_certificate={get_default_cert_dir()}/creds/engflow.crt\n"
                     )
                     bazelrc.write(
-                        f"build --tls_client_key=/home/{getpass.getuser()}/.engflow/creds/engflow.key\n"
+                        f"build --tls_client_key={get_default_cert_dir()}/creds/engflow.key\n"
                     )
             except OSError as exc:
                 print(exc)
@@ -441,11 +497,11 @@ def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
         if status_code == 200:
             public_hostname = response.text
         else:
-            public_hostname = "{{REPLACE_WITH_WORKSTATION_HOST_NAME}}"
+            public_hostname = "localhost"
         print(
-            f"""\nERROR: ~/.engflow/creds/engflow.crt not found. Please reach out to #ask-devprod-build if you need help with the steps below.
+            f"""\nERROR: {get_default_cert_dir()}/creds/engflow.crt not found. Please reach out to #ask-devprod-build if you need help with the steps below.
 
-(If the below steps are not working, remote execution can be disabled by passing BAZEL_FLAGS=--config=local at the end of your scons.py invocation)
+(If the below steps are not working or you are an external person to MongoDB, remote execution can be disabled by passing BAZEL_FLAGS=--config=local at the end of your scons.py invocation)
 
 Please complete the following steps to generate a certificate:
 - (If not in the Engineering org) Request access to the MANA group https://mana.corp.mongodbgov.com/resources/659ec4b9bccf3819e5608712
@@ -458,23 +514,23 @@ ZIP_FILE=~/Downloads/engflow-mTLS.zip
 
 curl https://raw.githubusercontent.com/mongodb/mongo/master/buildscripts/setup_engflow_creds.sh -o setup_engflow_creds.sh
 chmod +x ./setup_engflow_creds.sh
-./setup_engflow_creds.sh {getpass.getuser()} {public_hostname} $ZIP_FILE\n"""
+./setup_engflow_creds.sh {getpass.getuser()} {public_hostname} $ZIP_FILE {"local" if public_hostname == "localhost" else ""}\n"""
         )
         return False
 
     if not running_in_evergreen and (
-        not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt", os.R_OK)
-        or not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.key", os.R_OK)
+        not os.access(f"{get_default_cert_dir()}/creds/engflow.crt", os.R_OK)
+        or not os.access(f"{get_default_cert_dir()}/creds/engflow.key", os.R_OK)
     ):
         print(
-            "Invalid permissions set on ~/.engflow/creds/engflow.crt or ~/.engflow/creds/engflow.key"
+            f"Invalid permissions set on {get_default_cert_dir()}/creds/engflow.crt or {get_default_cert_dir()}/creds/engflow.key"
         )
         print("Please run the following command to fix the permissions:\n")
         print(
-            f"sudo chown {getpass.getuser()}:{getpass.getuser()} /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+            f"sudo chown {getpass.getuser()}:{getpass.getuser()} {get_default_cert_dir()}/creds/engflow.crt {get_default_cert_dir()}/creds/engflow.key"
         )
         print(
-            f"sudo chmod 600 /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+            f"sudo chmod 600 {get_default_cert_dir()}/creds/engflow.crt {get_default_cert_dir()}/creds/engflow.key"
         )
         return False
     return True
@@ -552,7 +608,7 @@ def sha256_file(filename: str) -> str:
 def verify_s3_hash(s3_path: str, local_path: str) -> None:
     if s3_path not in _S3_HASH_MAPPING:
         raise Exception(
-            f"S3 path not found in hash mapping, unable to verify downloaded for s3 path: s3_path"
+            "S3 path not found in hash mapping, unable to verify downloaded for s3 path: s3_path"
         )
 
     hash = sha256_file(local_path)
@@ -601,7 +657,7 @@ def auto_install_bazel(env, libdep, shlib_suffix):
         bazel_query = (
             ["cquery"]
             + env["BAZEL_FLAGS_STR"]
-            + [f"kind('extract_debuginfo', deps(@{bazel_target}))", "--output=files"]
+            + [f'kind("extract_debuginfo", deps("@{bazel_target}"))', "--output=files"]
         )
         try:
             query_results = retry_call(
@@ -626,7 +682,7 @@ def auto_install_bazel(env, libdep, shlib_suffix):
 
         bazel_node = env.File(f"#/{line}")
         auto_install_mapping = env["AIB_SUFFIX_MAP"].get(shlib_suffix)
-        bazel_debug(f"Bazel AutoInstalling {bazel_node}")
+
         new_installed_files = env.AutoInstall(
             auto_install_mapping.directory,
             bazel_node,
@@ -637,6 +693,8 @@ def auto_install_bazel(env, libdep, shlib_suffix):
 
         if not new_installed_files:
             new_installed_files = getattr(bazel_node.attributes, "AIB_INSTALLED_FILES", [])
+        else:
+            bazel_debug(f"Bazel AutoInstalling {bazel_node}")
         installed_files = getattr(bazel_libdep.attributes, "AIB_INSTALLED_FILES", [])
         setattr(
             bazel_libdep.attributes, "AIB_INSTALLED_FILES", new_installed_files + installed_files
@@ -673,8 +731,15 @@ def exists(env: SCons.Environment.Environment) -> bool:
 
 def handle_bazel_program_exception(env, target, outputs):
     prog_suf = env.subst("$PROGSUFFIX")
-    dbg_suffix = env.subst("$SEPDBG_SUFFIX")
+    dbg_suffix = ".pdb" if sys.platform == "win32" else env.subst("$SEPDBG_SUFFIX")
     bazel_program = False
+
+    # on windows the pdb for dlls contains no double extensions
+    # so we need to check all the outputs up front to know
+    for bazel_output_file in outputs:
+        if bazel_output_file.endswith(".dll"):
+            return False
+
     if os.path.splitext(outputs[0])[1] in [prog_suf, dbg_suffix]:
         for bazel_output_file in outputs:
             first_ext = os.path.splitext(bazel_output_file)[1]
@@ -683,8 +748,11 @@ def handle_bazel_program_exception(env, target, outputs):
             else:
                 second_ext = None
 
-            if (second_ext is not None and second_ext + first_ext == prog_suf + dbg_suffix) or (
-                second_ext is None and first_ext == prog_suf
+            if (
+                (second_ext is not None and second_ext + first_ext == prog_suf + dbg_suffix)
+                or (second_ext is None and first_ext == prog_suf)
+                or first_ext == ".exe"
+                or first_ext == ".pdb"
             ):
                 bazel_program = True
                 scons_node_str = bazel_output_file.replace(
@@ -765,28 +833,43 @@ def generate(env: SCons.Environment.Environment) -> None:
         f'--//bazel/config:linker={env.GetOption("linker")}',
         f'--//bazel/config:streams_release_build={env.GetOption("streams-release-build")}',
         f'--//bazel/config:release={env.GetOption("release") == "on"}',
-        f'--//bazel/config:build_enterprise={env.GetOption("modules") == "enterprise"}',
+        f'--//bazel/config:build_enterprise={"MONGO_ENTERPRISE_VERSION" in env}',
         f'--//bazel/config:visibility_support={env.GetOption("visibility-support")}',
         f'--//bazel/config:disable_warnings_as_errors={env.GetOption("disable-warnings-as-errors") == "source"}',
-        f"--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}",
-        f"--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}",
+        f'--//bazel/config:gcov={env.GetOption("gcov") is not None}',
+        f'--//bazel/config:pgo_profile={env.GetOption("pgo-profile") is not None}',
+        f"--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}",
+        f"--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}",
         f'--//bazel/config:ssl={"True" if env.GetOption("ssl") == "on" else "False"}',
+        "--define",
+        f"MONGO_VERSION={env['MONGO_VERSION']}",
         "--compilation_mode=dbg",  # always build this compilation mode as we always build with -g
     ]
+
+    # TODO(SERVER-94142): Port --enterprise-features to Bazel
+    if "MONGO_ENTERPRISE_VERSION" in env:
+        bazel_internal_flags += ["--cxxopt", "-DMONGO_ENTERPRISE_VERSION=1"]
+    if "audit" in env.get("MONGO_ENTERPRISE_FEATURES", []):
+        bazel_internal_flags += ["--cxxopt", "-DMONGO_ENTERPRISE_AUDIT=1"]
+    if "encryptdb" in env.get("MONGO_ENTERPRISE_FEATURES", []):
+        bazel_internal_flags += ["--cxxopt", "-DMONGO_ENTERPRISE_ENCRYPTDB=1"]
 
     if env["DWARF_VERSION"]:
         bazel_internal_flags.append(f"--//bazel/config:dwarf_version={env['DWARF_VERSION']}")
 
     if normalized_os == "macos":
+        bazel_internal_flags.append(
+            f"--//bazel/config:developer_dir={os.environ.get('DEVELOPER_DIR', '/Applications/Xcode.app')}"
+        )
         minimum_macos_version = "11.0" if normalized_arch == "arm64" else "10.14"
         bazel_internal_flags.append(f"--macos_minimum_os={minimum_macos_version}")
 
     http_client_option = env.GetOption("enable-http-client")
     if http_client_option is not None:
         if http_client_option in ["on", "auto"]:
-            bazel_internal_flags.append(f"--//bazel/config:http_client=True")
+            bazel_internal_flags.append("--//bazel/config:http_client=True")
         elif http_client_option == "off":
-            bazel_internal_flags.append(f"--//bazel/config:http_client=False")
+            bazel_internal_flags.append("--//bazel/config:http_client=False")
 
     sanitizer_option = env.GetOption("sanitize")
 
@@ -795,13 +878,7 @@ def generate(env: SCons.Environment.Environment) -> None:
         formatted_options = [f"--//bazel/config:{_SANITIZER_MAP[opt]}=True" for opt in options]
         bazel_internal_flags.extend(formatted_options)
 
-    # Disable RE for external developers and when executing on non-linux amd64/arm64 platforms
-    is_external_developer = not os.path.exists("/opt/mongodbtoolchain")
-    if (
-        normalized_os != "linux"
-        or normalized_arch not in ["arm64", "amd64"]
-        or is_external_developer
-    ):
+    if normalized_arch not in ["arm64", "amd64"]:
         bazel_internal_flags.append("--config=local")
 
     # Disable remote execution for public release builds.
@@ -955,7 +1032,7 @@ def generate(env: SCons.Environment.Environment) -> None:
                 "bazel_output": bazel_output_file.replace("\\", "/"),
             }
 
-    for scons_node in Globals.scons2bazel_targets:
+    for scons_node in sorted(Globals.scons2bazel_targets):
         bazel_debug(f"Created ThinTarget {scons_node} from {Globals.bazel_output(scons_node)}")
 
     globals = Globals()

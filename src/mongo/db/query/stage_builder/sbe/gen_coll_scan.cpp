@@ -101,7 +101,8 @@ void openCallback(OperationContext* opCtx, const CollectionPtr& collection) {
     // storage engine snapshot while waiting. Otherwise, we will end up reading from the
     // snapshot where the oplog entries are not yet visible even after the wait.
     shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
-    collection->getRecordStore()->waitForAllEarlierOplogWritesToBeVisible(opCtx);
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    storageEngine->waitForAllEarlierOplogWritesToBeVisible(opCtx, collection->getRecordStore());
 }
 
 /**
@@ -174,6 +175,7 @@ std::unique_ptr<sbe::PlanStage> buildResumeFromRecordIdSubtree(
     auto seekBranch =
         sbe::makeS<sbe::LoopJoinStage>(std::move(projStage),
                                        sbe::makeS<sbe::ScanStage>(collection->uuid(),
+                                                                  collection->ns().dbName(),
                                                                   boost::none /* recordSlot */,
                                                                   boost::none /* recordIdSlot*/,
                                                                   boost::none /* snapshotIdSlot */,
@@ -330,6 +332,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateClusteredColl
              CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords ||
          csn->boundInclusion == CollectionScanParams::ScanBoundInclusion::kIncludeEndRecordOnly);
     auto stage = sbe::makeS<sbe::ScanStage>(collection->uuid(),
+                                            collection->ns().dbName(),
                                             resultSlot,
                                             recordIdSlot,
                                             boost::none /* snapshotIdSlot */,
@@ -445,6 +448,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateGenericCollSc
 
     sbe::ScanCallbacks callbacks({}, {}, makeOpenCallbackIfNeeded(collection, csn));
     auto stage = sbe::makeS<sbe::ScanStage>(collection->uuid(),
+                                            collection->ns().dbName(),
                                             resultSlot,
                                             recordIdSlot,
                                             boost::none /* snapshotIdSlot */,

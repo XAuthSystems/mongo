@@ -221,7 +221,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, SetReadSource) {
     Lock::GlobalLock lk(clientAndCtx1.second.get(), MODE_IS);
     ru1->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided, Timestamp(1, 1));
     ASSERT_EQ(RecoveryUnit::ReadSource::kProvided, ru1->getTimestampReadSource());
-    ASSERT_EQ(Timestamp(1, 1), ru1->getPointInTimeReadTimestamp(clientAndCtx1.second.get()));
+    ASSERT_EQ(Timestamp(1, 1), ru1->getPointInTimeReadTimestamp());
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, NoOverlapReadSource) {
@@ -324,7 +324,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture,
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
     invariantWTOK(
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx1.second.get())),
+                               cursor),
         cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
@@ -349,7 +351,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture,
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
     invariantWTOK(
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx1.second.get())),
+                               cursor),
         cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
@@ -375,7 +379,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteAllowedWhileIgnorePrepareFalse) {
     cursor->set_key(cursor, "key1");
     cursor->set_value(cursor, "value1");
     invariantWTOK(
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx1.second.get())),
+                               cursor),
         cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
@@ -396,7 +402,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteAllowedWhileIgnorePrepareFalse) {
 
     // The write is allowed.
     invariantWTOK(
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx2.second.get()), cursor),
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx1.second.get())),
+                               cursor),
         cursor->session);
 
     ru1->abortUnitOfWork();
@@ -411,7 +419,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteOnADocumentBeingPreparedTriggersW
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
     invariantWTOK(
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx1.second.get())),
+                               cursor),
         cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
@@ -422,11 +432,52 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteOnADocumentBeingPreparedTriggersW
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value2");
     int ret =
-        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx2.second.get()), cursor);
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(
+                                   shard_role_details::getRecoveryUnit(clientAndCtx2.second.get())),
+                               cursor);
     ASSERT_EQ(WT_ROLLBACK, ret);
 
     ru1->abortUnitOfWork();
     ru2->abortUnitOfWork();
+}
+
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+                   PrepareTimestampOlderThanStableTimestamp,
+                   "prepare timestamp .* is not newer than the stable timestamp") {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    harnessHelper->getEngine()->setStableTimestamp({2, 1}, false);
+    ru1->setPrepareTimestamp({1, 1});
+    // It is illegal to set the prepare timestamp older than the stable timestamp.
+    ru1->prepareUnitOfWork();
+}
+
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+                   CommitTimestampOlderThanPrepareTimestamp,
+                   "commit timestamp .* is less than the prepare timestamp") {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    ru1->setDurableTimestamp({4, 1});  // Newer than the prepare timestamp.
+    harnessHelper->getEngine()->setStableTimestamp({2, 1}, false);
+    ru1->setPrepareTimestamp({3, 1});  // Newer than the stable timestamp.
+    ru1->prepareUnitOfWork();
+    ru1->setCommitTimestamp({1, 1});
+    // It is illegal to set the commit timestamp older than the prepare timestamp.
+    ru1->commitUnitOfWork();
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, RoundUpPreparedTimestamps) {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    RecoveryUnit::OpenSnapshotOptions roundUp{.roundUpPreparedTimestamps = true};
+    ru1->preallocateSnapshot(roundUp);
+    ru1->setDurableTimestamp({4, 1});
+    harnessHelper->getEngine()->setStableTimestamp({3, 1}, false);
+    // Check setting a prepared transaction timestamp earlier than the
+    // stable timestamp is valid with roundUpPreparedTimestamps option.
+    ru1->setPrepareTimestamp({2, 1});
+    ru1->prepareUnitOfWork();
+    // Check setting a commit timestamp earlier than the prepared transaction
+    // timestamp is valid with roundUpPreparedTimestamps option.
+    ru1->setCommitTimestamp({1, 1});
+    ru1->commitUnitOfWork();
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture,
@@ -713,7 +764,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsAreNotCached) {
     // Hold the global lock throughout the test to avoid having the global lock destructor
     // prematurely abandon snapshots.
     Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     std::unique_ptr<RecordStore> rs(
         harnessHelper->createRecordStore(opCtx, "test.checkpoint_cached"));
@@ -774,7 +825,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ReadOnceCursorsCached) {
     // Hold the global lock throughout the test to avoid having the global lock destructor
     // prematurely abandon snapshots.
     Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.read_once"));
     auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
@@ -830,7 +881,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CacheMixedOverwrite) {
     // Hold the global lock throughout the test to avoid having the global lock destructor
     // prematurely abandon snapshots.
     Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     // Close all cached cursors to establish a 'before' state.
     auto session = ru->getSession();
@@ -909,8 +960,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorNotChanged) {
     // prematurely abandon snapshots.
     Lock::GlobalLock globalLock(opCtx1, MODE_IX);
     Lock::GlobalLock globalLock2(opCtx2, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx1);
-    auto ru2 = WiredTigerRecoveryUnit::get(opCtx2);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx1));
+    auto ru2 = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx2));
 
     std::unique_ptr<RecordStore> rs(
         harnessHelper->createRecordStore(opCtx1, "test.checkpoint_stable"));
@@ -977,8 +1028,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorGetId) {
     // prematurely abandon snapshots.
     Lock::GlobalLock globalLock(opCtx1, MODE_IX);
     Lock::GlobalLock globalLock2(opCtx2, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx1);
-    auto ru2 = WiredTigerRecoveryUnit::get(opCtx2);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx1));
+    auto ru2 = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx2));
 
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx1, "test.checkpoint_id"));
 
@@ -1050,15 +1101,19 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, MultiTimestampConstraintsInternalState
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
-    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                  cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(
+            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+        cursor->session);
 
     // Perform a write at ts1.
     cursor->set_key(cursor, "key2");
     cursor->set_value(cursor, "value");
     ASSERT_OK(ru1->setTimestamp(ts1));
-    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                  cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(
+            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+        cursor->session);
 
     // Setting the timestamp again to the same value should not fail.
     ASSERT_OK(ru1->setTimestamp(ts1));
@@ -1072,8 +1127,10 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, MultiTimestampConstraintsInternalState
     cursor->set_key(cursor, "key3");
     cursor->set_value(cursor, "value");
     ASSERT_OK(ru1->setTimestamp(ts2));
-    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                  cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(
+            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+        cursor->session);
 
     ru1->commitUnitOfWork();
 }
@@ -1091,8 +1148,10 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotAbortMode) {
         getCursor(ru1, &cursor);
         cursor->set_key(cursor, key);
         cursor->set_value(cursor, "value");
-        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                      cursor->session);
+        invariantWTOK(
+            wiredTigerCursorInsert(
+                *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+            cursor->session);
 
         ru1->commitUnitOfWork();
     }
@@ -1192,15 +1251,19 @@ DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
         getCursor(ru1, &cursor);
         cursor->set_key(cursor, "key");
         cursor->set_value(cursor, "value");
-        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                      cursor->session);
+        invariantWTOK(
+            wiredTigerCursorInsert(
+                *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+            cursor->session);
 
         // Perform a write at ts1.
         cursor->set_key(cursor, "key2");
         cursor->set_value(cursor, "value");
         ASSERT_OK(ru1->setTimestamp(ts1));
-        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
-                      cursor->session);
+        invariantWTOK(
+            wiredTigerCursorInsert(
+                *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), cursor),
+            cursor->session);
 
         // Setting the timestamp again to a different value should detect that we're trying to set
         // multiple timestamps with the first write being non timestamped.
@@ -1231,7 +1294,7 @@ DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
              RollbackHandlerAbortsOnTxnOpen,
              "rollback handler reopened transaction") {
     auto opCtx = clientAndCtx1.second.get();
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
+    auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
     ASSERT(ru->getSession());
     {
         WriteUnitOfWork wuow(opCtx);

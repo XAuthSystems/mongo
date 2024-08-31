@@ -2,6 +2,8 @@
 // to each other during intra-cluster communication.
 // @tags: [requires_replication]
 
+import {ReplSetTest} from "jstests/libs/replsettest.js";
+
 const kAuthenticationSuccessfulLogId = 5286306;
 const kAuthenticationFailedLogId = 5286307;
 
@@ -41,6 +43,8 @@ const rst = new ReplSetTest({
     nodes: 1,
     nodeOptions: {
         setParameter: {
+            // Disable heartbeat logging to prevent exceeding the maximum log lines in checklog.
+            logComponentVerbosity: tojson({replication: {heartbeats: 0}}),
             "failpoint.disableQueryAnalysisSampler": tojson({mode: "alwaysOn"}),
         }
     },

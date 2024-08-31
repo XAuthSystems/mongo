@@ -41,7 +41,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/util/assert_util.h"
@@ -242,49 +241,6 @@ public:
     }
 
     /**
-     * Dictates whether to round up prepare and commit timestamp of a prepared transaction. If set
-     * to true, the prepare timestamp will be rounded up to the oldest timestamp if found to be
-     * earlier; and the commit timestamp will be rounded up to the prepare timestamp if found to
-     * be earlier.
-     *
-     * This must be called before a transaction begins, and defaults to false. On transaction close,
-     * we reset the value to its default.
-     *
-     */
-    virtual void setRoundUpPreparedTimestamps(bool value) {}
-
-    /**
-     * Returns whether we have enabled the setting to round up prepare and commit timestamps for
-     * prepared transactions. See `setRoundUpPreparedTimestamps` for details.
-     */
-    virtual bool getRoundUpPreparedTimestamps() {
-        return false;
-    }
-
-    /**
-     * Waits until all commits that happened before this call are durable in the journal. Returns
-     * true, unless the storage engine cannot guarantee durability, which should never happen when
-     * the engine is non-ephemeral. This cannot be called from inside a unit of work, and should
-     * fail if it is. This method invariants if the caller holds any locks, except for repair.
-     *
-     * Can throw write interruption errors from the JournalListener.
-     */
-    virtual bool waitUntilDurable(OperationContext* opCtx) = 0;
-
-    /**
-     * Unlike `waitUntilDurable`, this method takes a stable checkpoint, making durable any writes
-     * on unjournaled tables that are behind the current stable timestamp. If the storage engine
-     * is starting from an "unstable" checkpoint or 'stableCheckpoint'=false, this method call will
-     * turn into an unstable checkpoint.
-     *
-     * This must not be called by a system taking user writes until after a stable timestamp is
-     * passed to the storage engine.
-     */
-    virtual bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) {
-        return waitUntilDurable(opCtx);
-    }
-
-    /**
      * If there is an open transaction, it is closed. If the current AbandonSnapshotMode is
      * 'kAbort', the transaction is aborted. If the mode is 'kCommit' the transaction is committed,
      * and all data currently pointed to by cursors remains pinned until the cursors are
@@ -309,12 +265,31 @@ public:
     void setOperationContext(OperationContext* opCtx);
 
     /**
+     * Extensible structure for configuring options to begin a new transaction.
+     *
+     * - roundUpPreparedTimestamps dictates whether to round up prepare and commit timestamp of a
+     * prepared transaction. If set to true, the prepare timestamp will be rounded up to the oldest
+     * timestamp if found to be earlier; and the commit timestamp will be rounded up to the prepare
+     * timestamp if found to be earlier.
+     */
+    struct OpenSnapshotOptions {
+        bool roundUpPreparedTimestamps = false;
+
+        bool operator==(const OpenSnapshotOptions& other) const = default;
+    };
+    static const OpenSnapshotOptions kDefaultOpenSnapshotOptions;
+
+    /**
      * Informs the RecoveryUnit that a snapshot will be needed soon, if one was not already
      * established. This specifically allows the storage engine to preallocate any required
      * transaction resources while minimizing the critical section between generating a new
      * timestamp and setting it using setTimestamp.
+     *
+     * Non default options can be configured before a transaction begins. However, if a transaction
+     * is already open, attempting to change the options is forbidden.
      */
-    virtual void preallocateSnapshot() {}
+    virtual void preallocateSnapshot(
+        const OpenSnapshotOptions& options = kDefaultOpenSnapshotOptions) {}
 
     /**
      * Returns whether or not a majority commmitted snapshot is available. If no snapshot has yet
@@ -346,7 +321,7 @@ public:
      *
      * This may passively start a storage engine transaction to establish a read timestamp.
      */
-    virtual boost::optional<Timestamp> getPointInTimeReadTimestamp(OperationContext* opCtx) {
+    virtual boost::optional<Timestamp> getPointInTimeReadTimestamp() {
         return boost::none;
     }
 
@@ -868,6 +843,23 @@ public:
         return _inUnitOfWork();
     }
 
+    /**
+     * Allows callers to indicate when the operation using a RecoveryUnit is holding an exclusive
+     * resource and is not allowed to block indefinitely. If an operation would block, like on a
+     * prepare conflict, a StorageUnavailable exception is thrown.
+     */
+    void setBlockingAllowed(bool canBlock) {
+        _blockingAllowed = canBlock;
+    }
+
+    /**
+     * Returns true if this operation is allowed to block indefinitely for storage engine resources.
+     */
+    bool getBlockingAllowed() const {
+        return _blockingAllowed;
+    }
+
+
 protected:
     RecoveryUnit() = default;
 
@@ -954,6 +946,7 @@ private:
     State _state = State::kInactive;
     OperationContext* _opCtx = nullptr;
     bool _readOnly = false;
+    bool _blockingAllowed = true;
 };
 
 /**

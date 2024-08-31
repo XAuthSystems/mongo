@@ -78,13 +78,13 @@
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/eof_node_type.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_tag.h"
+#include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_enumerator/plan_enumerator.h"
 #include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/planner_access.h"
@@ -1874,6 +1874,22 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     return {std::move(out)};
 }  // QueryPlanner::plan
+
+StatusWith<QueryPlanner::CostBasedRankerResult> QueryPlanner::planWithCostBasedRanking(
+    const CanonicalQuery& query, const QueryPlannerParams& params) {
+    auto statusWithMultiPlanSolns = QueryPlanner::plan(query, params);
+    if (!statusWithMultiPlanSolns.isOK()) {
+        return statusWithMultiPlanSolns.getStatus();
+    }
+    // This is a temporary stub implementation of CBR which arbitrarily picks the last of the
+    // enumerated plans.
+    std::vector<std::unique_ptr<QuerySolution>> soln;
+    soln.push_back(std::move(statusWithMultiPlanSolns.getValue().back()));
+    return QueryPlanner::CostBasedRankerResult{
+        .solutions = std::move(soln),
+        .rejectedPlans = {},
+    };
+}
 
 /**
  * If 'query.cqPipeline()' is non-empty, it contains a prefix of the aggregation pipeline that can

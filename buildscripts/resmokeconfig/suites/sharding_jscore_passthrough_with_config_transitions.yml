@@ -53,26 +53,14 @@ selector:
     # longer be active and the test will fail.
     - jstests/core/failcommand_failpoint.js
 
-    # Uses getmores. This suite executes random moveCollections in the background that cause open
-    # cursors on the collection to be killed.
-    - jstests/core/administrative/current_op/currentop_cursors.js
-    - jstests/core/administrative/list_all_local_sessions.js
-    - jstests/core/index/wildcard/wildcard_index_covered_queries.js
-    - jstests/core/timeseries/bucket_unpacking_with_compound_sort_on_point_queries.js
-    - jstests/core/timeseries/bucket_unpacking_with_match_fixed_buckets.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort_extended_range.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort_negative.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort_on_multiple_fields_point_queries.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort_on_single_field_point_queries.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort.js
-    - jstests/core/timeseries/timeseries_internal_bounded_sort_compound_mixed_types.js
-    - jstests/core/timeseries/timeseries_update_normalize_metadata.js
-    - jstests/core/write/crud_api.js
-    - jstests/core/write/delete/remove8.js
-    - src/mongo/db/modules/enterprise/jstests/fle2/collection_coll_stats.js
-
     # TODO (SERVER-90646): Re-enable background_unique_indexes.js in config transition suites.
     - jstests/core/ddl/background_unique_indexes.js
+
+    # Exclude tests that run cleanupOrphaned, which can fail running on a config shard if a
+    # concurrent migration fails due to the config shard transitioning to dedicated.
+    - jstests/core/administrative/cleanup_orphaned.js
+    - jstests/core/views/views_all_commands.js
+    - jstests/core/commands_namespace_parsing.js
 
   exclude_with_any_tags:
     - assumes_standalone_mongod
@@ -103,6 +91,7 @@ executor:
         await import("jstests/libs/override_methods/implicitly_retry_on_shard_transition_errors.js");
       global_vars:
         TestData:
+          runningWithBalancer: true
           shardsAddedRemoved: true
   hooks:
     - class: ContinuousAddRemoveShard

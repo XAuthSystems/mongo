@@ -1,5 +1,6 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function collectionExists(shard, dbName, collName) {
     return Array.contains(shard.getDB(dbName).getCollectionNames(), collName);
@@ -22,8 +23,7 @@ const coll2NS = dbName + '.' + coll2Name;
 const coll3NS = dbName + '.' + coll3Name;
 const coll4NS = dbName + '.' + coll4Name;
 
-const isMultiversion =
-    jsTest.options().shardMixedBinVersions || jsTest.options().useRandomBinVersionsWithinReplicaSet;
+const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
 const ffTrackUnsharded = !isMultiversion &&
     FeatureFlagUtil.isEnabled(st.configRS.getPrimary(), "TrackUnshardedCollectionsUponCreation");
 

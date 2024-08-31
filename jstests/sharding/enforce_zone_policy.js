@@ -1,5 +1,6 @@
 // Tests changing the zones on a shard at runtime results in a correct distribution of chunks across
 // the cluster
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 const st = new ShardingTest({shards: 3, mongos: 1, other: {chunkSize: 1}});
@@ -36,7 +37,10 @@ function assertBalanceCompleteAndStable(checkFunc, stepName) {
 
     assert.soon(checkFunc, 'Balance at step ' + stepName + ' did not happen', 3 * 60 * 1000, 2000);
 
-    st.awaitBalancerRound();
+    // When running with CSRS stepdowns, the balancer round might take longer to complete
+    const balancerRoundTimeout = TestData.runningWithConfigStepdowns ? 3 * 60 * 1000 : 60 * 1000;
+    st.awaitBalancerRound(balancerRoundTimeout);
+
     st.printShardingStatus(true);
     assert(checkFunc());
 

@@ -637,7 +637,7 @@ void setInitializationTimeOnPlacementHistory(
 }  // namespace
 
 void ShardingCatalogManager::create(ServiceContext* serviceContext,
-                                    std::unique_ptr<executor::TaskExecutor> addShardExecutor,
+                                    std::shared_ptr<executor::TaskExecutor> addShardExecutor,
                                     std::shared_ptr<Shard> localConfigShard,
                                     std::unique_ptr<ShardingCatalogClient> localCatalogClient) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
@@ -671,7 +671,7 @@ ShardingCatalogManager* ShardingCatalogManager::get(OperationContext* operationC
 
 ShardingCatalogManager::ShardingCatalogManager(
     ServiceContext* serviceContext,
-    std::unique_ptr<executor::TaskExecutor> addShardExecutor,
+    std::shared_ptr<executor::TaskExecutor> addShardExecutor,
     std::shared_ptr<Shard> localConfigShard,
     std::unique_ptr<ShardingCatalogClient> localCatalogClient)
     : _serviceContext(serviceContext),
@@ -1474,7 +1474,7 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
         boost::optional<Timestamp> originalReadTimestamp;
         if (originalReadSource == RecoveryUnit::ReadSource::kProvided) {
             originalReadTimestamp =
-                shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
+                shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
         }
 
         ScopeGuard resetopCtxStateGuard([&] {

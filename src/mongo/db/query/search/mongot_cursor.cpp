@@ -219,9 +219,6 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     std::vector<std::unique_ptr<executor::TaskExecutorCursor>> additionalCursors;
 
     if (expCtx->explain) {
-        tassert(8431800,
-                "Sharded $search queries should not establishCursors() for explain.",
-                !expCtx->needsMerge);
         initialCursor = makeTaskExecutorCursorForExplain(
             expCtx, command, taskExecutor, std::move(getMoreStrategy), std::move(yieldPolicy));
 
@@ -231,8 +228,9 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
                                                command,
                                                {std::move(getMoreStrategy), std::move(yieldPolicy)},
                                                makeRetryOnNetworkErrorPolicy());
-        additionalCursors = initialCursor->releaseAdditionalCursors();
     }
+
+    additionalCursors = initialCursor->releaseAdditionalCursors();
     cursors.push_back(std::move(initialCursor));
     // Preserve cursor order. Expect cursors to be labeled, so this may not be necessary.
     for (auto& thisCursor : additionalCursors) {
@@ -302,20 +300,20 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     const auto& protocolVersion =
         expCtx->needsMerge ? spec.getMetadataMergeProtocolVersion() : boost::none;
 
-    return establishCursors(expCtx,
-                            getRemoteCommandRequestForSearchQuery(
-                                expCtx->opCtx,
-                                expCtx->ns,
-                                expCtx->uuid,
-                                expCtx->explain,
-                                query,
-                                protocolVersion,
-                                docsRequested,
-                                batchSize,
-                                spec.getRequiresSearchSequenceToken().value_or(false)),
-                            taskExecutor,
-                            std::move(getMoreStrategy),
-                            std::move(yieldPolicy));
+    return establishCursors(
+        expCtx,
+        getRemoteCommandRequestForSearchQuery(expCtx->opCtx,
+                                              expCtx->ns,
+                                              expCtx->uuid,
+                                              expCtx->explain,
+                                              query,
+                                              protocolVersion,
+                                              docsRequested,
+                                              batchSize,
+                                              spec.getRequiresSearchSequenceToken()),
+        taskExecutor,
+        std::move(getMoreStrategy),
+        std::move(yieldPolicy));
 }
 
 std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSearchMetaStage(

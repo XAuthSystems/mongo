@@ -1,4 +1,5 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load(
     "//bazel/config:configs.bzl",
     "allocator",
@@ -8,9 +9,11 @@ load(
     "compiler_type",
     "dbg",
     "detect_odr_violations",
+    "developer_dir",
     "disable_warnings_as_errors",
     "dwarf_version",
     "fsan",
+    "gcov",
     "http_client",
     "libunwind",
     "linker",
@@ -19,6 +22,7 @@ load(
     "lsan",
     "msan",
     "opt",
+    "pgo_profile",
     "release",
     "separate_debug",
     "shared_archive",
@@ -924,6 +928,21 @@ config_setting(
     },
 )
 
+config_setting(
+    name = "use_disable_ref_track_disabled",
+    flag_values = {
+        "//bazel/config:use_disable_ref_track": "False",
+    },
+)
+
+selects.config_setting_group(
+    name = "selected_disable_ref_track",
+    match_any = [
+        ":use_disable_ref_track_disabled",
+        ":release_enabled",
+    ],
+)
+
 # --------------------------------------
 # wiredtiger options
 # --------------------------------------
@@ -1746,6 +1765,14 @@ selects.config_setting_group(
     ],
 )
 
+selects.config_setting_group(
+    name = "ssl_disabled_linux",
+    match_all = [
+        "@platforms//os:linux",
+        ":ssl_disabled",
+    ],
+)
+
 # --------------------------------------
 # thin_lto
 # --------------------------------------
@@ -1760,4 +1787,100 @@ config_setting(
     flag_values = {
         "//bazel/config:thin_lto": "True",
     },
+)
+
+# --------------------------------------
+# gdbserver options
+# --------------------------------------
+
+gcov(
+    name = "gcov",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "gcov_enabled",
+    flag_values = {
+        "//bazel/config:gcov": "True",
+    },
+)
+
+# --------------------------------------
+# pgo_profile options
+# --------------------------------------
+
+pgo_profile(
+    name = "pgo_profile",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "pgo_profile_enabled",
+    flag_values = {
+        "//bazel/config:pgo_profile": "True",
+    },
+)
+
+bool_flag(
+    name = "scons_query",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "scons_query_enabled",
+    flag_values = {
+        "//bazel/config:scons_query": "True",
+    },
+)
+
+# --------------------------------------
+# crypto options
+# --------------------------------------
+
+# Note: This intentionally matches regardless of SSL setting.
+config_setting(
+    name = "mongo_crypto_windows",
+    constraint_values = ["@platforms//os:windows"],
+)
+
+# Note: This intentionally matches regardless of SSL setting.
+config_setting(
+    name = "mongo_crypto_apple",
+    constraint_values = ["@platforms//os:macos"],
+)
+
+selects.config_setting_group(
+    name = "mongo_crypto_openssl",
+    match_all = [
+        ":ssl_enabled_linux",
+    ],
+)
+
+selects.config_setting_group(
+    name = "mongo_crypto_tom",
+    match_all = [
+        ":ssl_disabled_linux",
+    ],
+)
+
+# --------------------------------------
+# symbol reordering options
+# --------------------------------------
+
+selects.config_setting_group(
+    name = "symbol_ordering_file_enabled",
+    match_all = [
+        "@platforms//os:linux",
+        ":opt_any",
+        ":linker_lld",
+    ],
+)
+
+# --------------------------------------
+# developer dir
+# --------------------------------------
+
+developer_dir(
+    name = "developer_dir",
+    build_setting_default = "/Applications/Xcode.app",
 )

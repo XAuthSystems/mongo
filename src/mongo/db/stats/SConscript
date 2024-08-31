@@ -5,16 +5,6 @@ Import("env")
 env = env.Clone()
 
 env.Library(
-    target="timer_stats",
-    source=[
-        "timer_stats.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
-env.Library(
     target="top",
     source=[
         "top.cpp",
@@ -41,65 +31,6 @@ env.Library(
 )
 
 env.Library(
-    target="counters",
-    source=[
-        "counters.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/db/commands/server_status_core",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/util/concurrency/spin_lock",
-    ],
-)
-
-env.Library(
-    target="server_read_concern_write_concern_metrics",
-    source=[
-        "server_read_concern_metrics.cpp",
-        "server_write_concern_metrics.cpp",
-        "read_concern_stats.idl",
-        "server_write_concern_metrics.idl",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/db/repl/read_concern_args",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/commands/server_status_core",
-        "$BUILD_DIR/mongo/db/server_base",
-    ],
-)
-
-env.Library(
-    target="read_preference_metrics",
-    source=[
-        "read_preference_metrics.cpp",
-        "read_preference_metrics.idl",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/client/read_preference",
-        "$BUILD_DIR/mongo/db/commands/server_status_core",
-        "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
-        "$BUILD_DIR/mongo/db/repl/repl_settings",
-        "$BUILD_DIR/mongo/db/server_base",
-    ],
-)
-
-env.Library(
-    target="resource_consumption_metrics",
-    source=[
-        "resource_consumption_metrics.cpp",
-        "operation_resource_consumption.idl",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/commands/server_status_core",
-        "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
-        "$BUILD_DIR/mongo/db/server_base",
-    ],
-)
-
-env.Library(
     target="change_collection_server_status",
     source=[
         "change_collection_server_status.cpp",
@@ -114,17 +45,6 @@ env.Library(
         "$BUILD_DIR/mongo/db/commands/server_status_core",
         "$BUILD_DIR/mongo/db/server_base",
         "$BUILD_DIR/mongo/db/shard_role",
-    ],
-)
-
-env.Library(
-    target="transaction_stats",
-    source=[
-        "single_transaction_stats.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/repl/read_concern_args",
-        "$BUILD_DIR/mongo/db/server_base",
     ],
 )
 

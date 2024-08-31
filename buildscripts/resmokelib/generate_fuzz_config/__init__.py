@@ -29,7 +29,7 @@ class GenerateFuzzConfig(Subcommand):
         filename = "mongod.conf"
         output_file = os.path.join(self._output_path, filename)
         user_param = utils.dump_yaml({})
-        set_parameters, wt_engine_config, wt_coll_config, wt_index_config = (
+        set_parameters, wt_engine_config, wt_coll_config, wt_index_config, encryption_config = (
             mongo_fuzzer_configs.fuzz_mongod_set_parameters(
                 self._mongod_mode, self._seed, user_param
             )
@@ -49,6 +49,14 @@ class GenerateFuzzConfig(Subcommand):
                 }
             },
         }
+        if encryption_config:
+            # Convert empty string to True for config file compatibility.
+            # Resmoke uses an empty string to indicate a flag argument with no value,
+            # but the mongod configuration file expects a boolean for enableEncryption.
+            # https://www.mongodb.com/docs/manual/reference/configuration-options/#security-options
+            if encryption_config.get("enableEncryption") == "":
+                encryption_config["enableEncryption"] = True
+            conf["security"] = encryption_config
         if self._template_path is not None:
             try:
                 shutil.copy(os.path.join(self._template_path, filename), output_file)

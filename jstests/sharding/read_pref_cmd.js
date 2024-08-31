@@ -8,6 +8,7 @@
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {awaitRSClientHosts, reconnect} from "jstests/replsets/rslib.js";
 
 const nodeCount = 3;
@@ -326,8 +327,7 @@ let testConnReadPreference = function(
                 pipeline: [isRouter ? {$project: {_id: true, x: true}} : {$project: {x: 1}}]
             }));
 
-    const isMultiversion = jsTest.options().shardMixedBinVersions ||
-        jsTest.options().useRandomBinVersionsWithinReplicaSet;
+    const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
 
     const isValidMongos =
         !isMongos || MongoRunner.compareBinVersions(conn.fullOptions.binVersion, "7.1") >= 0;

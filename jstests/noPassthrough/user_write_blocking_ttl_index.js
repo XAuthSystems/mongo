@@ -11,6 +11,7 @@
 // ]
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 // Test on replset primary
 const rst = new ReplSetTest({
@@ -67,7 +68,8 @@ function runTest(conn, testCase) {
                 "error": {
                     "code": ErrorCodes.UserWritesBlocked,
                     "codeName": "UserWritesBlocked",
-                    "errmsg": "User writes blocked"
+                    "errmsg":
+                        "Plan executor error during delete :: caused by :: User writes blocked"
                 }
             });
         }

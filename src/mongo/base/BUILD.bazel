@@ -4,9 +4,29 @@ load("@poetry//:dependencies.bzl", "dependency")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(
+    [
+        "generate_error_codes.yml",
+        "generate_error_codes.py",
+    ] + glob([
+        "*.h",
+        "*.cpp",
+    ]),
+)
+
 render_template(
     name = "error_codes_source",
-    generator_script = "generate_error_codes.py",
+    srcs = [
+        "error_codes.tpl.cpp",
+        "error_codes.yml",
+        "generate_error_codes.py",
+    ],
+    cmd = [
+        "$(location generate_error_codes.py)",
+        "$(location error_codes.yml)",
+        "$(location error_codes.tpl.cpp)",
+        "$(location error_codes.cpp)",
+    ],
     output = "error_codes.cpp",
     python_libs = [
         dependency(
@@ -18,13 +38,21 @@ render_template(
             group = "core",
         ),
     ],
-    template = "error_codes.tpl.cpp",
-    yml = "error_codes.yml",
 )
 
 render_template(
     name = "error_codes_header",
-    generator_script = "generate_error_codes.py",
+    srcs = [
+        "error_codes.tpl.h",
+        "error_codes.yml",
+        "generate_error_codes.py",
+    ],
+    cmd = [
+        "$(location generate_error_codes.py)",
+        "$(location error_codes.yml)",
+        "$(location error_codes.tpl.h)",
+        "$(location error_codes.h)",
+    ],
     output = "error_codes.h",
     python_libs = [
         dependency(
@@ -36,8 +64,6 @@ render_template(
             group = "core",
         ),
     ],
-    template = "error_codes.tpl.h",
-    yml = "error_codes.yml",
 )
 
 mongo_cc_library(
@@ -47,5 +73,34 @@ mongo_cc_library(
     ],
     hdrs = [
         "environment_buffer.h",
+    ],
+)
+
+mongo_cc_library(
+    name = "system_error",
+    srcs = [
+        "system_error.cpp",
+    ],
+    hdrs = [
+        "system_error.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
+    name = "secure_allocator",
+    srcs = [
+        "secure_allocator.cpp",
+    ],
+    hdrs = [
+        "secure_allocator.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/bson:bson_validate",
+        "//src/mongo/util:processinfo",
+        "//src/mongo/util:secure_zero_memory",
     ],
 )

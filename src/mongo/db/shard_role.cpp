@@ -125,14 +125,10 @@ void removeByPtr(List& l, T* p) {
 }
 
 void validateResolvedCollectionByUUID(OperationContext* opCtx,
-                                      CollectionOrViewAcquisitionRequest ar,
-                                      const Collection* coll) {
+                                      const CollectionOrViewAcquisitionRequest& ar,
+                                      const NamespaceString& nss) {
     invariant(ar.nssOrUUID.isUUID());
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Namespace " << ar.nssOrUUID.dbName().toStringForErrorMsg() << ":"
-                          << ar.nssOrUUID.uuid() << " not found",
-            coll);
-    auto shardVersion = OperationShardingState::get(opCtx).getShardVersion(coll->ns());
+    auto shardVersion = OperationShardingState::get(opCtx).getShardVersion(nss);
     uassert(ErrorCodes::IncompatibleShardingMetadata,
             str::stream() << "Collection " << ar.nssOrUUID.dbName().toStringForErrorMsg() << ":"
                           << ar.nssOrUUID.uuid()
@@ -143,8 +139,19 @@ void validateResolvedCollectionByUUID(OperationContext* opCtx,
                           << ar.nssOrUUID.dbName().toStringForErrorMsg() << ":"
                           << ar.nssOrUUID.uuid()
                           << ". Expected: " << ar.nssOrUUID.dbName().toStringForErrorMsg()
-                          << " Actual: " << coll->ns().dbName().toStringForErrorMsg(),
-            coll->ns().dbName() == ar.nssOrUUID.dbName());
+                          << " Actual: " << nss.dbName().toStringForErrorMsg(),
+            nss.dbName() == ar.nssOrUUID.dbName());
+}
+
+void validateResolvedCollectionByUUID(OperationContext* opCtx,
+                                      const CollectionOrViewAcquisitionRequest& ar,
+                                      const Collection* coll) {
+    invariant(ar.nssOrUUID.isUUID());
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Namespace " << ar.nssOrUUID.dbName().toStringForErrorMsg() << ":"
+                          << ar.nssOrUUID.uuid() << " not found",
+            coll);
+    validateResolvedCollectionByUUID(opCtx, ar, coll->ns());
 }
 
 /**
@@ -177,19 +184,30 @@ ResolvedNamespaceOrViewAcquisitionRequests resolveNamespaceOrViewAcquisitionRequ
 
             resolvedAcquisitionRequests.emplace_back(std::move(resolvedAcquisitionRequest));
         } else if (ar.nssOrUUID.isUUID()) {
-            auto coll = catalog.lookupCollectionByUUID(opCtx, ar.nssOrUUID.uuid());
+            // We lookup in pending commit entries as well here since this function is used for
+            // UUID->NSS resolution. The usual flow for doing this in locked cases is:
+            // * Getting the NSS from the UUID considering pending entries
+            // * Acquiring a lock on the collection to prevent renames/drops
+            // * Getting the NSS again from the UUID considering pending entries
+            // In this case this method is safe to call because we will retry again if any DDL
+            // operation occurred between our lock acquisition and the next mapping attempt
+            // finished. Once the lock is acquired any DDL operation will have finished and
+            // committed and will either NOT have changed the UUID or changed it, which forces an
+            // entire retry of the operation we just described.
+            auto nss = catalog.resolveNamespaceStringOrUUIDWithCommitPendingEntries_UNSAFE(
+                opCtx, ar.nssOrUUID);
 
-            validateResolvedCollectionByUUID(opCtx, ar, coll);
+            validateResolvedCollectionByUUID(opCtx, ar, nss);
 
-            AcquisitionPrerequisites prerequisites(coll->ns(),
-                                                   coll->uuid(),
+            AcquisitionPrerequisites prerequisites(nss,
+                                                   ar.nssOrUUID.uuid(),
                                                    ar.readConcern,
                                                    ar.placementConcern,
                                                    ar.operationType,
                                                    ar.viewMode);
 
             ResolvedNamespaceOrViewAcquisitionRequest resolvedAcquisitionRequest{
-                ResourceId(RESOURCE_COLLECTION, coll->ns()),
+                ResourceId(RESOURCE_COLLECTION, nss),
                 prerequisites,
                 ResolutionType::kUUID,
                 nullptr,
@@ -244,7 +262,7 @@ void verifyDbAndCollection(OperationContext* opCtx,
         }
         if (shard_role_details::getRecoveryUnit(opCtx)->isActive()) {
             const auto mySnapshot =
-                shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
+                shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
             if (mySnapshot && *mySnapshot < coll->getMinimumValidSnapshot()) {
                 throwWriteConflictException(str::stream()
                                             << "Unable to write to collection '"
@@ -280,8 +298,7 @@ std::variant<CollectionPtr, std::shared_ptr<const ViewDefinition>> acquireLocalC
     const AcquisitionPrerequisites& prerequisites) {
     const auto& nss = prerequisites.nss;
 
-    auto readTimestamp =
-        shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
+    auto readTimestamp = shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
     auto coll = CollectionPtr(
         catalog.establishConsistentCollection(opCtx, NamespaceStringOrUUID(nss), readTimestamp));
     checkCollectionUUIDMismatch(opCtx, catalog, nss, coll, prerequisites.uuid);
@@ -489,12 +506,14 @@ bool haveAcquiredConsistentCatalogAndSnapshot(const CollectionCatalog* catalogBe
 }
 
 std::shared_ptr<const CollectionCatalog> getConsistentCatalogAndSnapshot(
-    OperationContext* opCtx, const NamespaceStringOrUUIDRequests& acquisitionRequests) {
+    OperationContext* opCtx,
+    const NamespaceStringOrUUIDRequests& acquisitionRequests,
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     while (true) {
         shard_role_details::SnapshotAttempt snapshotAttempt(opCtx, acquisitionRequests);
         snapshotAttempt.snapshotInitialState();
         snapshotAttempt.changeReadSourceForSecondaryReads();
-        snapshotAttempt.openStorageSnapshot();
+        snapshotAttempt.openStorageSnapshot(openSnapshotOptions);
         if (auto catalog = snapshotAttempt.getConsistentCatalog()) {
             return catalog;
         }
@@ -562,9 +581,11 @@ ResolvedNamespaceOrViewAcquisitionRequest::LockFreeReadsResources takeGlobalLock
 }
 
 std::shared_ptr<const CollectionCatalog> stashConsistentCatalog(
-    OperationContext* opCtx, const CollectionOrViewAcquisitionRequests& acquisitionRequests) {
+    OperationContext* opCtx,
+    const CollectionOrViewAcquisitionRequests& acquisitionRequests,
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     auto requests = toNamespaceStringOrUUIDs(acquisitionRequests);
-    auto catalog = getConsistentCatalogAndSnapshot(opCtx, requests);
+    auto catalog = getConsistentCatalogAndSnapshot(opCtx, requests, openSnapshotOptions);
     // Stash the catalog, it will be automatically unstashed when the snapshot is released.
     CollectionCatalog::stash(opCtx, catalog);
     return catalog;
@@ -818,11 +839,13 @@ const ViewDefinition& ViewAcquisition::getViewDefinition() const {
     return *_acquiredView->viewDefinition;
 }
 
-CollectionAcquisition acquireCollection(OperationContext* opCtx,
-                                        CollectionAcquisitionRequest acquisitionRequest,
-                                        LockMode mode) {
+CollectionAcquisition acquireCollection(
+    OperationContext* opCtx,
+    CollectionAcquisitionRequest acquisitionRequest,
+    LockMode mode,
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     return CollectionAcquisition(
-        acquireCollectionOrView(opCtx, std::move(acquisitionRequest), mode));
+        acquireCollectionOrView(opCtx, std::move(acquisitionRequest), mode, openSnapshotOptions));
 }
 
 CollectionAcquisitions acquireCollections(OperationContext* opCtx,
@@ -864,9 +887,12 @@ CollectionOrViewAcquisitionMap makeAcquisitionMap(CollectionOrViewAcquisitions a
 }
 
 CollectionOrViewAcquisition acquireCollectionOrView(
-    OperationContext* opCtx, CollectionOrViewAcquisitionRequest acquisitionRequest, LockMode mode) {
+    OperationContext* opCtx,
+    CollectionOrViewAcquisitionRequest acquisitionRequest,
+    LockMode mode,
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     CollectionOrViewAcquisitionRequests requests{std::move(acquisitionRequest)};
-    auto acquisition = acquireCollectionsOrViews(opCtx, requests, mode);
+    auto acquisition = acquireCollectionsOrViews(opCtx, requests, mode, openSnapshotOptions);
     invariant(acquisition.size() == 1);
     return std::move(acquisition.front());
 }
@@ -924,7 +950,14 @@ void SnapshotAttempt::changeReadSourceForSecondaryReads() {
     for (auto& nsOrUUID : _acquisitionRequests) {
         NamespaceString nss;
         try {
-            nss = catalog->resolveNamespaceStringOrUUID(_opCtx, nsOrUUID);
+            // This can lookup into the commit pending entries without establishing a consistent
+            // collection. This is safe because we only use this resolved namespace to check if the
+            // collection is replicated or not. As we do not allow changing this setting by the user
+            // this is independent of the consistent collection namespace. Note that a later check
+            // in the Acquisition API will verify that it is not uncommitted in the WT snapshot. We
+            // do not allow lookups on uncommitted collections since they still do not exist.
+            nss = catalog->resolveNamespaceStringOrUUIDWithCommitPendingEntries_UNSAFE(_opCtx,
+                                                                                       nsOrUUID);
         } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
             invariant(nsOrUUID.isUUID());
 
@@ -941,7 +974,8 @@ void SnapshotAttempt::changeReadSourceForSecondaryReads() {
     }
 }
 
-void SnapshotAttempt::openStorageSnapshot() {
+void SnapshotAttempt::openStorageSnapshot(
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     invariant(_shouldReadAtLastApplied);
 
     // If the collection requires capped snapshots (i.e. it is unreplicated, capped, not the
@@ -974,7 +1008,7 @@ void SnapshotAttempt::openStorageSnapshot() {
     }
 
     if (!shard_role_details::getRecoveryUnit(_opCtx)->isActive()) {
-        shard_role_details::getRecoveryUnit(_opCtx)->preallocateSnapshot();
+        shard_role_details::getRecoveryUnit(_opCtx)->preallocateSnapshot(openSnapshotOptions);
         _openedSnapshot = true;
     }
 }
@@ -1013,8 +1047,7 @@ ResolvedNamespaceOrViewAcquisitionRequests generateSortedAcquisitionRequests(
         lockFreeReadsResources) {
     ResolvedNamespaceOrViewAcquisitionRequests resolvedAcquisitionRequests;
 
-    auto readTimestamp =
-        shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
+    auto readTimestamp = shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
 
     int counter = 0;
     for (const auto& ar : acquisitionRequests) {
@@ -1085,7 +1118,9 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
 
     // Open a consistent catalog snapshot if needed.
     bool openSnapshot = !shard_role_details::getRecoveryUnit(opCtx)->isActive();
-    auto catalog = openSnapshot ? stashConsistentCatalog(opCtx, acquisitionRequests)
+    auto catalog = openSnapshot ? stashConsistentCatalog(opCtx,
+                                                         acquisitionRequests,
+                                                         RecoveryUnit::kDefaultOpenSnapshotOptions)
                                 : CollectionCatalog::get(opCtx);
 
     try {
@@ -1107,7 +1142,8 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsLockFree(
 CollectionOrViewAcquisitions acquireCollectionsOrViews(
     OperationContext* opCtx,
     const CollectionOrViewAcquisitionRequests& acquisitionRequests,
-    LockMode mode) {
+    LockMode mode,
+    const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions) {
     if (acquisitionRequests.empty()) {
         return {};
     }
@@ -1178,19 +1214,21 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
         // user provided one. Note that multi-document transactions will get a WCE thrown later
         // during the checks performed by verifyDbAndCollection if the collection metadata has
         // changed.
-        bool hasOptimisticResolutionFailed = false;
-        for (auto& ar : sortedAcquisitionRequests) {
-            const auto& prerequisites = ar.prerequisites;
-            if (ar.resolvedBy != ResolutionType::kUUID) {
-                continue;
-            }
-            const auto& currentCatalog = CollectionCatalog::get(opCtx);
-            const auto coll = currentCatalog->lookupCollectionByNamespace(opCtx, prerequisites.nss);
-            if (prerequisites.uuid && (!coll || coll->uuid() != prerequisites.uuid)) {
-                hasOptimisticResolutionFailed = true;
-                break;
-            }
-        }
+        bool hasOptimisticResolutionFailed = std::any_of(
+            sortedAcquisitionRequests.begin(),
+            sortedAcquisitionRequests.end(),
+            [&](const auto& ar) {
+                const auto& prerequisites = ar.prerequisites;
+                if (ar.resolvedBy != ResolutionType::kUUID) {
+                    return false;
+                }
+                const auto& currentCatalog = CollectionCatalog::get(opCtx);
+                const auto nss =
+                    currentCatalog->resolveNamespaceStringOrUUIDWithCommitPendingEntries_UNSAFE(
+                        opCtx,
+                        NamespaceStringOrUUID{prerequisites.nss.dbName(), *prerequisites.uuid});
+                return prerequisites.nss != nss;
+            });
 
         if (MONGO_unlikely(hasOptimisticResolutionFailed)) {
             // Retry optimistic resolution.
@@ -1199,15 +1237,40 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
 
         // Open a consistent catalog snapshot if needed.
         bool openSnapshot = !shard_role_details::getRecoveryUnit(opCtx)->isActive();
-        auto catalog = openSnapshot ? stashConsistentCatalog(opCtx, acquisitionRequests)
-                                    : CollectionCatalog::get(opCtx);
+        auto catalog = openSnapshot
+            ? stashConsistentCatalog(opCtx, acquisitionRequests, openSnapshotOptions)
+            : CollectionCatalog::get(opCtx);
 
         try {
             return acquireResolvedCollectionsOrViewsWithoutTakingLocks(
                 opCtx, *catalog, sortedAcquisitionRequests);
-        } catch (...) {
+        } catch (const DBException& ex) {
             if (openSnapshot && !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork())
                 shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+
+            if (ex.code() == ErrorCodes::CollectionUUIDMismatch) {
+                const auto info = ex.extraInfo<CollectionUUIDMismatchInfo>();
+                // A UUID mismatch error here for a collection we requested by UUID should be
+                // transformed into a NamespaceNotFound error to avoid confusing the user if it
+                // doesn't exist in our snapshot. This error must be treated here since we do commit
+                // pending lookups for namespace resolution before we've established a consistent
+                // collection.
+                //
+                // This case could be reached by having correctly looked up a commit pending UUID
+                // twice for a collection that has just been created but not yet visible in our WT
+                // snapshot. In this case we have to reconvert the CollectionUUIDMismatch error.
+                auto isUUIDMismatchDueToFailedResolution =
+                    std::any_of(sortedAcquisitionRequests.begin(),
+                                sortedAcquisitionRequests.end(),
+                                [&](const ResolvedNamespaceOrViewAcquisitionRequest& ar) {
+                                    return ar.resolvedBy == ResolutionType::kUUID &&
+                                        ar.prerequisites.uuid == info->collectionUUID();
+                                });
+                uassert(ErrorCodes::NamespaceNotFound,
+                        str::stream() << "Namespace " << info->dbName().toStringForErrorMsg() << ":"
+                                      << info->collectionUUID() << " not found",
+                        !(isUUIDMismatchDueToFailedResolution && !info->actualCollection()));
+            }
             throw;
         }
     }
@@ -1442,7 +1505,8 @@ void restoreTransactionResourcesToOperationContext(
 
         // Reestablish a consistent catalog snapshot (multi document transactions don't yield).
         auto requests = toNamespaceStringOrUUIDs(transactionResources.acquiredCollections);
-        auto catalog = getConsistentCatalogAndSnapshot(opCtx, requests);
+        auto catalog = getConsistentCatalogAndSnapshot(
+            opCtx, requests, RecoveryUnit::kDefaultOpenSnapshotOptions);
 
         // Reacquire service snapshots. Will throw if placement concern can no longer be met.
         for (auto& acquiredCollection : transactionResources.acquiredCollections) {

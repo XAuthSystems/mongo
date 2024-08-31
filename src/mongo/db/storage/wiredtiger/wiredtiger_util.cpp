@@ -102,7 +102,7 @@ void WiredTigerEventHandler::setWtConnReadyStatus(bool status) {
     LOGV2(7003100,
           "WiredTiger connection close is waiting for active statistics readers to finish",
           "activeReaders"_attr = _activeSections);
-    _idleCondition.wait(lock, [this]() { return _activeSections != 0; });
+    _idleCondition.wait(lock, [this]() { return _activeSections == 0; });
 }
 
 bool WiredTigerEventHandler::getSectionActivityPermit() {
@@ -687,7 +687,7 @@ logv2::LogComponent getWTLOGV2Component(const BSONObj& obj) {
         case WT_VERB_COMPACT:
         case WT_VERB_COMPACT_PROGRESS:
             return logv2::LogComponent::kWiredTigerCompact;
-        case WT_VERB_EVICT:
+        case WT_VERB_EVICTION:
             return logv2::LogComponent::kWiredTigerEviction;
         case WT_VERB_HS:
         case WT_VERB_HS_ACTIVITY:
@@ -1302,7 +1302,7 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
         {logv2::LogComponent::kWiredTigerBackup, "backup"},
         {logv2::LogComponent::kWiredTigerCheckpoint, "checkpoint"},
         {logv2::LogComponent::kWiredTigerCompact, "compact"},
-        {logv2::LogComponent::kWiredTigerEviction, "evict"},
+        {logv2::LogComponent::kWiredTigerEviction, "eviction"},
         {logv2::LogComponent::kWiredTigerHS, "history_store"},
         {logv2::LogComponent::kWiredTigerRecovery, "recovery"},
         {logv2::LogComponent::kWiredTigerRTS, "rts"},

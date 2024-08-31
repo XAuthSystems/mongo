@@ -30,69 +30,6 @@ env.Library(
     ],
 )
 
-generateJSErrorCodes = env.Command(
-    target=["error_codes.js"],
-    source=[
-        "$BUILD_DIR/mongo/base/generate_error_codes.py",
-        "$BUILD_DIR/mongo/base/error_codes.yml",
-        "error_codes.tpl.js",
-    ],
-    action=["$PYTHON ${SOURCES[0]} ${SOURCES[1]} ${SOURCES[2]} ${TARGETS[0]}"],
-)
-env.Alias("generated-sources", generateJSErrorCodes)
-
-# Files added here need to be added in scripting/engine.cpp and buildscripts/vcxproj.header as well.
-js_header = env.JSHeader(
-    target="mongojs.cpp",
-    source=[
-        "assert.js",
-        "bulk_api.js",
-        "check_log.js",
-        "collection.js",
-        "crud_api.js",
-        "db.js",
-        "error_codes.js",
-        "explainable.js",
-        "explain_query.js",
-        "mongo.js",
-        "query.js",
-        "session.js",
-        "types.js",
-        "utils_auth.js",
-        "utils.js",
-        "utils_sh.js",
-    ],
-)
-
-env.Alias("generated-sources", js_header)
-
-# Files added here need to be added in shell/shell_utils.cpp as well.
-env.JSHeader(
-    target="mongo-server.cpp",
-    source=[
-        "servers.js",
-        "shardingtest.js",
-        "servers_misc.js",
-        "replsettest.js",
-        "data_consistency_checker.js",
-        "bridge.js",
-        "keyvault.js",
-        "feature_compatibility_version.js",
-    ],
-)
-
-env.Alias("generated-sources", "mongo-server.cpp")
-
-env.Library(
-    target="mongojs",
-    source=[
-        "mongojs.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
 shellEnv = env.Clone()
 if shellEnv.TargetOSIs("windows"):
     shellEnv.Append(
@@ -129,8 +66,8 @@ if shouldBuildGRPC(env):
 env.Library(
     target="shell_options_register",
     source=[
-        "shell_options.idl",
-        "shell_options_grpc.idl" if shouldBuildGRPC(env) else [],
+        "shell_options_gen.cpp",
+        "shell_options_grpc_gen.cpp" if shouldBuildGRPC(env) else [],
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",
@@ -139,18 +76,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/util/options_parser/options_parser",
-    ],
-)
-
-env.Library(
-    target="program_runner",
-    source=[
-        "program_runner.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/base/environment_buffer",
-        "$BUILD_DIR/mongo/db/service_context",
     ],
 )
 
@@ -179,19 +104,10 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/bson/util/bson_column",
         "$BUILD_DIR/mongo/db/auth/security_token_auth",
+        "$BUILD_DIR/mongo/db/query/collation/collator_icu",
         "$BUILD_DIR/mongo/db/storage/record_store_base",
         "$BUILD_DIR/mongo/util/icu",
         "program_runner",
-    ],
-)
-
-env.Library(
-    target="kms_idl",
-    source=[
-        "kms.idl",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
     ],
 )
 
@@ -266,32 +182,10 @@ if get_option("ssl") == "on":
             ],
         )
 
-env.Library(
-    target="linenoise_utf8",
-    source=[
-        "linenoise_utf8.cpp",
-    ],
-)
-
-env.Library(
-    target="linenoise",
-    source=[
-        "linenoise.cpp",
-        "mk_wcwidth.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
-    LIBDEPS_PRIVATE=[
-        "linenoise_utf8",
-    ],
-)
-
 if not has_option("noshell") and jsEngine:
     env.Library(
         target="mongo_initializers",
         source=[
-            "mongodbcr.cpp",
             "shell_options_init.cpp",
         ],
         LIBDEPS_PRIVATE=[
@@ -299,7 +193,16 @@ if not has_option("noshell") and jsEngine:
             # please add that library here, as a private library dependency.
             "$BUILD_DIR/mongo/client/clientdriver_network",
             "$BUILD_DIR/mongo/client/connection_string",
+            "$BUILD_DIR/mongo/client/cyrus_sasl_client" if env["MONGO_BUILD_SASL_CLIENT"] else "",
             "$BUILD_DIR/mongo/db/catalog/index_key_validate",
+            "$BUILD_DIR/mongo/db/modules/enterprise/src/fips/fips_mode_client"
+            if "fle" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+            and get_option("js-engine") != "none"
+            else "",
+            "$BUILD_DIR/mongo/db/modules/enterprise/src/fle/shell/implicit_encrypted_dbclient"
+            if "fle" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+            and get_option("js-engine") != "none"
+            else "",
             "$BUILD_DIR/mongo/db/mongohasher",
             "$BUILD_DIR/mongo/db/pipeline/change_stream_error_extra_info",
             "$BUILD_DIR/mongo/db/query/command_request_response",

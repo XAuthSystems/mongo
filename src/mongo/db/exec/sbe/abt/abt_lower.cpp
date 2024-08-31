@@ -54,7 +54,6 @@
 #include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/exchange.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
@@ -76,7 +75,6 @@
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
-#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/db/query/optimizer/utils/reftracker_utils.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
@@ -289,17 +287,14 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
     std::vector<std::unique_ptr<sbe::EExpression>>& args,
     std::string name) {
     tassert(7814401, "NodeProps must not be nullptr in shardFilter lowering", _np);
-    tassert(7814402, "Metadata must not be nullptr in shardFilter lowering", _metadata);
 
     // First, get the paths to the shard key fields.
-    auto indexingAvailabilityProp =
-        getPropertyConst<properties::IndexingAvailability>(_np->_logicalProps);
-    const std::string& scanDefName = indexingAvailabilityProp.getScanDefName();
+    const std::string& scanDefName = *(_np->_indexScanDefName);
     tassert(7814403,
             "The metadata must contain the scan definition specified by the "
             "IndexingAvailability property in order to perform shard filtering",
-            _metadata->_scanDefs.contains(scanDefName));
-    const auto& shardKeyPaths = _metadata->_scanDefs.at(scanDefName).shardingMetadata().shardKey();
+            _scanDefs->contains(scanDefName));
+    const auto& shardKeyPaths = _scanDefs->at(scanDefName)._shardKey;
 
     // Specify a BSONObj which will contain the shard key values.
     tassert(7814404,
@@ -471,9 +466,8 @@ sbe::value::SlotVector SBENodeLowering::convertProjectionsToSlots(
 
 sbe::value::SlotVector SBENodeLowering::convertRequiredProjectionsToSlots(
     const SlotVarMap& slotMap,
-    const NodeProps& props,
+    const LoweringNodeProps& props,
     const sbe::value::SlotVector& toExclude) const {
-    using namespace properties;
 
     sbe::value::SlotSet toExcludeSet;
     for (const auto slot : toExclude) {
@@ -485,9 +479,7 @@ sbe::value::SlotVector SBENodeLowering::convertRequiredProjectionsToSlots(
     // projections to the same slot. 'convertProjectionsToSlots' can't dedup because it preserves
     // the order of items in the vector.
     sbe::value::SlotSet seen;
-    const auto& projections =
-        getPropertyConst<ProjectionRequirement>(props._physicalProps).getProjections();
-    for (const auto slot : convertProjectionsToSlots(slotMap, projections.getVector())) {
+    for (const auto slot : convertProjectionsToSlots(slotMap, props._projections->getVector())) {
         if (toExcludeSet.count(slot) == 0 && seen.count(slot) == 0) {
             result.push_back(slot);
             seen.insert(slot);
@@ -531,7 +523,6 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
                                                       boost::optional<sbe::value::SlotId>& ridSlot,
                                                       const ABT& child,
                                                       const ABT& refs) {
-    using namespace properties;
     auto input = generateInternal(child, slotMap, ridSlot);
 
     auto output = refs.cast<References>();
@@ -546,13 +537,10 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
         }
     }
 
-    if (const auto& props = _nodeToGroupPropsMap.at(&n);
-        hasProperty<ProjectionRequirement>(props._physicalProps)) {
+    if (const auto& props = _nodeToGroupPropsMap.at(&n); props._projections.has_value()) {
         if (const auto& ridProjName = props._ridProjName) {
             // If we required rid on the Root node, populate ridSlot.
-            const auto& projections =
-                getPropertyConst<ProjectionRequirement>(props._physicalProps).getProjections();
-            if (projections.find(*ridProjName)) {
+            if (props._projections->find(*ridProjName)) {
                 // Deliver the ridSlot separate from the slotMap.
                 ridSlot = slotMap.at(*ridProjName);
                 finalMap.erase(*ridProjName);
@@ -660,6 +648,18 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
+                                                      const ExchangeNode& n,
+                                                      SlotVarMap& slotMap,
+                                                      boost::optional<sbe::value::SlotId>& ridSlot,
+                                                      const ABT& child,
+                                                      const ABT& refs) {
+    uasserted(9382600,
+              "ABT node lowering encountered operator which cannot be directly lowered "
+              "to a SBE.");
+    return nullptr;
+}
+
+std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
                                                       const LimitSkipNode& n,
                                                       SlotVarMap& slotMap,
                                                       boost::optional<sbe::value::SlotId>& ridSlot,
@@ -669,89 +669,10 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
     return sbe::makeS<sbe::LimitSkipStage>(
         std::move(input),
         sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64,
-                                   sbe::value::bitcastFrom<int64_t>(n.getProperty().getLimit())),
+                                   sbe::value::bitcastFrom<int64_t>(n.getLimit())),
         sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64,
-                                   sbe::value::bitcastFrom<int64_t>(n.getProperty().getSkip())),
+                                   sbe::value::bitcastFrom<int64_t>(n.getSkip())),
         getPlanNodeId(n));
-}
-
-std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
-                                                      const ExchangeNode& n,
-                                                      SlotVarMap& slotMap,
-                                                      boost::optional<sbe::value::SlotId>& ridSlot,
-                                                      const ABT& child,
-                                                      const ABT& refs) {
-    using namespace std::literals;
-    using namespace properties;
-
-    // The DOP is obtained from the child (number of producers).
-    const auto& childProps = _nodeToGroupPropsMap.at(n.getChild().cast<Node>())._physicalProps;
-    const auto& childDistribution = getPropertyConst<DistributionRequirement>(childProps);
-    tassert(6624330,
-            "Parent and child distributions are the same",
-            !(childDistribution == n.getProperty()));
-
-    const size_t localDOP =
-        (childDistribution.getDistributionAndProjections()._type == DistributionType::Centralized)
-        ? 1
-        : _metadata._numberOfPartitions;
-    tassert(6624215, "invalid DOP", localDOP >= 1);
-
-    auto input = generateInternal(child, slotMap, ridSlot);
-
-    // Initialized to arbitrary placeholder
-    sbe::ExchangePolicy localPolicy{};
-    std::unique_ptr<sbe::EExpression> partitionExpr;
-
-    const auto& distribAndProjections = n.getProperty().getDistributionAndProjections();
-    switch (distribAndProjections._type) {
-        case DistributionType::Centralized:
-        case DistributionType::Replicated:
-            localPolicy = sbe::ExchangePolicy::broadcast;
-            break;
-
-        case DistributionType::RoundRobin:
-            localPolicy = sbe::ExchangePolicy::roundrobin;
-            break;
-
-        case DistributionType::RangePartitioning:
-            // We set 'localPolicy' to 'ExchangePolicy::rangepartition' here, but there is more
-            // that we need to do to actually support the RangePartitioning distribution.
-            // TODO SERVER-62523: Implement real support for the RangePartitioning distribution
-            // and add some test coverage.
-            localPolicy = sbe::ExchangePolicy::rangepartition;
-            break;
-
-        case DistributionType::HashPartitioning: {
-            localPolicy = sbe::ExchangePolicy::hashpartition;
-            std::vector<std::unique_ptr<sbe::EExpression>> args;
-            for (const ProjectionName& proj : distribAndProjections._projectionNames) {
-                auto it = slotMap.find(proj);
-                tassert(6624216, str::stream() << "undefined var: " << proj, it != slotMap.end());
-
-                args.emplace_back(sbe::makeE<sbe::EVariable>(it->second));
-            }
-            partitionExpr = sbe::makeE<sbe::EFunction>("hash"_sd, toInlinedVector(std::move(args)));
-            break;
-        }
-
-        case DistributionType::UnknownPartitioning:
-            tasserted(6624217, "Cannot partition into unknown distribution");
-
-        default:
-            MONGO_UNREACHABLE;
-    }
-
-    const auto& nodeProps = _nodeToGroupPropsMap.at(&n);
-    auto fields = convertRequiredProjectionsToSlots(slotMap, nodeProps);
-
-    return sbe::makeS<sbe::ExchangeConsumer>(std::move(input),
-                                             localDOP,
-                                             std::move(fields),
-                                             localPolicy,
-                                             std::move(partitionExpr),
-                                             nullptr,
-                                             nodeProps._planNodeId);
 }
 
 static sbe::value::SortDirection collationOpToSBESortDirection(const CollationOp collOp) {
@@ -788,16 +709,12 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
     }
 
     const auto& nodeProps = _nodeToGroupPropsMap.at(&n);
-    const auto& physProps = nodeProps._physicalProps;
 
     std::unique_ptr<sbe::EExpression> limit = nullptr;
-    if (properties::hasProperty<properties::LimitSkipRequirement>(physProps)) {
-        const auto& limitSkipReq =
-            properties::getPropertyConst<properties::LimitSkipRequirement>(physProps);
-        tassert(6624221, "We should not have skip set here", limitSkipReq.getSkip() == 0);
-        limit =
-            sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64,
-                                       sbe::value::bitcastFrom<int64_t>(limitSkipReq.getLimit()));
+    if (nodeProps._hasLimitSkip) {
+        tassert(6624221, "We should not have skip set here", nodeProps._skip == 0);
+        limit = sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64,
+                                           sbe::value::bitcastFrom<int64_t>(nodeProps._limit));
     }
 
     // TODO: obtain defaults for these.
@@ -1259,9 +1176,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
                                                       SlotVarMap& slotMap,
                                                       boost::optional<sbe::value::SlotId>& ridSlot,
                                                       const ABT& /*binds*/) {
-    const ScanDefinition& def = _metadata._scanDefs.at(n.getScanDefName());
-    tassert(6624231, "Collection must exist to lower Scan", def.exists());
-    auto& typeSpec = def.getOptionsMap().at("type");
+    const auto& def = _scanDefs.at(n.getScanDefName());
+    tassert(6624231, "Collection must exist to lower Scan", def._exists);
+    auto& typeSpec = def._options.at("type");
 
     boost::optional<sbe::value::SlotId> scanRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1271,8 +1188,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
 
     const PlanNodeId planNodeId = getPlanNodeId(n);
     if (typeSpec == "mongod") {
-        tassert(8423400, "ScanDefinition must have a UUID", def.getUUID().has_value());
-        const UUID& uuid = def.getUUID().get();
+        tassert(9361901, "ScanDefinition must have a UUID", def._uuid.has_value());
+        const UUID& uuid = def._uuid.get();
 
         // Unused.
         boost::optional<sbe::value::SlotId> seekRecordIdSlot;
@@ -1280,6 +1197,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
         sbe::ScanCallbacks callbacks({}, {}, {});
         if (n.useParallelScan()) {
             return sbe::makeS<sbe::ParallelScanStage>(uuid,
+                                                      def._dbName,
                                                       rootSlot,
                                                       scanRidSlot,
                                                       boost::none,
@@ -1307,6 +1225,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
         }();
         return sbe::makeS<sbe::ScanStage>(
             uuid,
+            def._dbName,
             rootSlot,
             scanRidSlot,
             boost::none,
@@ -1343,17 +1262,16 @@ std::unique_ptr<sbe::EExpression> SBENodeLowering::convertBoundsToExpr(
     SlotVarMap& slotMap,
     const bool isLower,
     const bool reversed,
-    const IndexDefinition& indexDef,
     const CompoundBoundRequirement& bound) {
     std::vector<std::unique_ptr<sbe::EExpression>> ksFnArgs;
-    ksFnArgs.emplace_back(
-        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64,
-                                   sbe::value::bitcastFrom<int64_t>(indexDef.getVersion())));
+    ksFnArgs.emplace_back(sbe::makeE<sbe::EConstant>(
+        sbe::value::TypeTags::NumberInt64,
+        sbe::value::bitcastFrom<int64_t>(LoweringScanDefinition::kIndexVersion)));
 
     // TODO: ordering is unsigned int32??
-    ksFnArgs.emplace_back(
-        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                   sbe::value::bitcastFrom<uint32_t>(indexDef.getOrdering())));
+    ksFnArgs.emplace_back(sbe::makeE<sbe::EConstant>(
+        sbe::value::TypeTags::NumberInt32,
+        sbe::value::bitcastFrom<uint32_t>(LoweringScanDefinition::kIndexOrderingBits)));
 
     auto exprLower = getExpressionLowering(slotMap);
     for (const auto& expr : bound.getBound()) {
@@ -1387,12 +1305,11 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
     const auto& fieldProjectionMap = n.getFieldProjectionMap();
 
     const std::string& indexDefName = n.getIndexDefName();
-    const ScanDefinition& scanDef = _metadata._scanDefs.at(n.getScanDefName());
-    tassert(6624232, "Collection must exist to lower IndexScan", scanDef.exists());
-    const IndexDefinition& indexDef = scanDef.getIndexDefs().at(indexDefName);
+    const auto& scanDef = _scanDefs.at(n.getScanDefName());
+    tassert(6624232, "Collection must exist to lower IndexScan", scanDef._exists);
 
-    tassert(8423399, "ScanDefinition must have a UUID", scanDef.getUUID().has_value());
-    const UUID& uuid = scanDef.getUUID().get();
+    tassert(8423400, "ScanDefinition must have a UUID", scanDef._uuid.has_value());
+    const UUID& uuid = scanDef._uuid.get();
 
     boost::optional<sbe::value::SlotId> scanRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1426,10 +1343,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
         std::swap(lowBoundPtr, highBoundPtr);
     }
 
-    auto lowerBoundExpr =
-        convertBoundsToExpr(slotMap, true /*isLower*/, reverse, indexDef, *lowBoundPtr);
-    auto upperBoundExpr =
-        convertBoundsToExpr(slotMap, false /*isLower*/, reverse, indexDef, *highBoundPtr);
+    auto lowerBoundExpr = convertBoundsToExpr(slotMap, true /*isLower*/, reverse, *lowBoundPtr);
+    auto upperBoundExpr = convertBoundsToExpr(slotMap, false /*isLower*/, reverse, *highBoundPtr);
     tassert(6624234,
             "Invalid bounds combination",
             lowerBoundExpr != nullptr || upperBoundExpr == nullptr);
@@ -1437,6 +1352,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
     // Unused.
     boost::optional<sbe::value::SlotId> resultSlot;
     return sbe::makeS<sbe::SimpleIndexScanStage>(uuid,
+                                                 scanDef._dbName,
                                                  indexDefName,
                                                  !reverse,
                                                  resultSlot,
@@ -1457,14 +1373,14 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
                                                       boost::optional<sbe::value::SlotId>& ridSlot,
                                                       const ABT& /*binds*/,
                                                       const ABT& /*refs*/) {
-    const ScanDefinition& def = _metadata._scanDefs.at(n.getScanDefName());
-    tassert(6624235, "Collection must exist to lower Seek", def.exists());
+    const auto& def = _scanDefs.at(n.getScanDefName());
+    tassert(6624235, "Collection must exist to lower Seek", def._exists);
 
-    auto& typeSpec = def.getOptionsMap().at("type");
+    auto& typeSpec = def._options.at("type");
     tassert(6624236, "SeekNode only supports mongod collections", typeSpec == "mongod");
 
-    tassert(8423398, "ScanDefinition must have a UUID", def.getUUID().has_value());
-    const UUID& uuid = def.getUUID().get();
+    tassert(9361900, "ScanDefinition must have a UUID", def._uuid.has_value());
+    const UUID& uuid = def._uuid.get();
 
     boost::optional<sbe::value::SlotId> seekRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1476,6 +1392,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ABT& abtn,
 
     sbe::ScanCallbacks callbacks({}, {}, {});
     return sbe::makeS<sbe::ScanStage>(uuid,
+                                      def._dbName,
                                       rootSlot,
                                       seekRidSlot,
                                       boost::none,

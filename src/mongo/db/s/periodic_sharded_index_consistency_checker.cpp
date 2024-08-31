@@ -61,7 +61,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/query/cluster_aggregate.h"
+#include "mongo/s/query/planner/cluster_aggregate.h"
 #include "mongo/s/routing_information_cache.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_shard_version_helpers.h"
@@ -276,9 +276,10 @@ void PeriodicShardedIndexConsistencyChecker::_launchOrResumeShardedTimeseriesSha
             try {
                 uassertStatusOK(
                     ShardingCatalogManager::get(opCtx)->checkTimeseriesShardKeys(opCtx));
-            } catch (const ExceptionForCat<ErrorCategory::CancellationError>&) {
-                // The job is shutting down.
-                return;
+            } catch (const DBException& ex) {
+                LOGV2(9406000,
+                      "Error while checking timeseries sharded index consistency",
+                      "error"_attr = ex.toStatus());
             }
         },
         Milliseconds(shardedTimeseriesShardkeyCheckIntervalMS),

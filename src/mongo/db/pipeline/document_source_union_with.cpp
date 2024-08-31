@@ -28,6 +28,7 @@
  */
 
 
+#include "variables.h"
 #include <absl/container/flat_hash_map.h>
 #include <iterator>
 
@@ -103,7 +104,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
 DocumentSourceUnionWith::DocumentSourceUnionWith(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
-    : DocumentSource(kStageName, expCtx), _pipeline(std::move(pipeline)) {
+    : DocumentSource(kStageName, expCtx),
+      _pipeline(std::move(pipeline)),
+      _variablesParseState(_variables.useIdGenerator()) {
     if (!_pipeline->getContext()->ns.isOnInternalDb()) {
         globalOpCounters.gotNestedAggregate();
     }
@@ -260,6 +263,15 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
     }
 
     if (_executionState == ExecutionProgress::kStartingSubPipeline) {
+        // Since the subpipeline will be executed again for explain, we store the starting
+        // state of the variables to reset them later.
+        if (pExpCtx->explain) {
+            auto expCtx = _pipeline->getContext();
+            _variables = expCtx->variables;
+            _variablesParseState =
+                expCtx->variablesParseState.copyWith(_variables.useIdGenerator());
+        }
+
         auto serializedPipe = _pipeline->serializeToBson();
         logStartingSubPipeline(serializedPipe);
         try {
@@ -392,6 +404,10 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
             std::move(_pushedDownStages.begin(),
                       _pushedDownStages.end(),
                       std::back_inserter(recoveredPipeline));
+            // We reset the variables to their inital state for another execution.
+            // TODO SERVER-94227 we probably don't need to do any validation as part of this parsing
+            // pass?
+            _variables.copyToExpCtx(_variablesParseState, _pipeline->getContext().get());
             pipeCopy = Pipeline::parse(recoveredPipeline, _pipeline->getContext()).release();
         } else {
             // The plan does not require reading from the sub-pipeline, so just include the
@@ -453,6 +469,8 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
         auto serializedPipeline = [&]() -> std::vector<BSONObj> {
             if (opts.transformIdentifiers ||
                 opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+                // TODO SERVER-94227 we don't need to do any validation as part of this parsing
+                // pass.
                 return Pipeline::parse(_userPipeline, _pipeline->getContext())
                     ->serializeToBson(opts);
             }

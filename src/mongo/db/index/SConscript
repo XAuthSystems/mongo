@@ -15,24 +15,6 @@ env.Benchmark(
     ],
 )
 
-env.Library(
-    target="expression_params",
-    source=[
-        "expression_params.cpp",
-        "s2_common.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/bson/util/bson_extract",
-        "$BUILD_DIR/mongo/db/geo/geometry",
-        "$BUILD_DIR/mongo/db/geo/geoparser",
-        "$BUILD_DIR/mongo/db/mongohasher",
-        "$BUILD_DIR/mongo/db/query/collation/collator_interface",
-        "$BUILD_DIR/mongo/db/server_base",
-        "$BUILD_DIR/mongo/db/storage/key_string",
-        "$BUILD_DIR/third_party/s2/s2",
-    ],
-)
-
 iamEnv = env.Clone()
 iamEnv.InjectThirdParty(libraries=["snappy"])
 iamEnv.Library(
@@ -49,7 +31,7 @@ iamEnv.Library(
         "hash_access_method.cpp",
         "index_access_method.cpp",
         "index_build_interceptor.cpp",
-        "index_build_interceptor.idl",
+        "index_build_interceptor_gen.cpp",
         "index_descriptor.cpp",
         "multikey_paths.cpp",
         "s2_access_method.cpp",
@@ -94,7 +76,7 @@ iamEnv.Library(
         "$BUILD_DIR/mongo/util/concurrency/spin_lock",
         "$BUILD_DIR/mongo/util/progress_meter",
         "$BUILD_DIR/third_party/s2/s2",
-        "$BUILD_DIR/third_party/shim_snappy",
+        "$BUILD_DIR/third_party/snappy/snappy",
         "column_store_index",
         "expression_params",
     ],
@@ -113,7 +95,7 @@ iamEnv.Library(
         "$BUILD_DIR/mongo/db/sorter/sorter_stats",
         "$BUILD_DIR/mongo/db/storage/encryption_hooks",
         "$BUILD_DIR/mongo/db/storage/storage_options",
-        "$BUILD_DIR/third_party/shim_snappy",
+        "$BUILD_DIR/third_party/snappy/snappy",
     ],
 )
 
@@ -124,10 +106,6 @@ indexTestEnv.CppUnitTest(
     source=[
         "2d_key_generator_test.cpp",
         "btree_key_generator_test.cpp",
-        "column_cell_test.cpp",
-        "column_key_generator_test.cpp",
-        "column_store_sorter_test.cpp",
-        "columns_access_method_test.cpp",
         "hash_key_generator_test.cpp",
         "index_build_interceptor_test.cpp",
         "multikey_paths_test.cpp",

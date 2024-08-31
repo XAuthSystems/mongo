@@ -29,11 +29,14 @@ filters:
       - 10gen/query-optimization
   - "document_source_current_op*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-integration
   - "document_source_densify*":
     approvers:
       - 10gen/query-integration
   - "document_source_fill*":
+    approvers:
+      - 10gen/query-integration
+  - "document_source_hybrid_scoring*":
     approvers:
       - 10gen/query-integration
   - "document_source_index_stats*":
@@ -49,6 +52,9 @@ filters:
     approvers:
       - 10gen/query-optimization
   - "document_source_query_stats*":
+    approvers:
+      - 10gen/query-integration
+  - "document_source_rank_fusion*":
     approvers:
       - 10gen/query-integration
   - "document_source_set_window_fields*":

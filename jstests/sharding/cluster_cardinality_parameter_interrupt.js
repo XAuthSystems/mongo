@@ -13,6 +13,9 @@
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     checkClusterParameter,
     interruptConfigsvrAddShard,
@@ -149,8 +152,7 @@ assert.commandWorked(st.s.adminCommand(
     {unshardCollection: dbName + '.' + shardedCollName3, toShard: shard1Rst.name}));
 
 // TODO (SERVER-91070) Enable these tests in multiversion once v9.0 become last-lts.
-const isMultiversion =
-    jsTest.options().shardMixedBinVersions || jsTest.options().useRandomBinVersionsWithinReplicaSet;
+const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
 if (!isMultiversion) {
     // Move the remaining data out of shard0 so it can be removed.
     assert.commandWorked(st.s.adminCommand({

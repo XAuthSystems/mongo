@@ -148,7 +148,11 @@ std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearch::desugar() {
 }
 
 StageConstraints DocumentSourceSearch::constraints(Pipeline::SplitState pipeState) const {
-    return DocumentSourceInternalSearchMongotRemote::getSearchDefaultConstraints();
+    auto constraints = DocumentSourceInternalSearchMongotRemote::getSearchDefaultConstraints();
+    if (!isStoredSource()) {
+        constraints.noFieldModifications = true;
+    }
+    return constraints;
 }
 bool checkRequiresSearchSequenceToken(Pipeline::SourceContainer::iterator itr,
                                       Pipeline::SourceContainer* container) {
@@ -175,7 +179,7 @@ Pipeline::SourceContainer::iterator DocumentSourceSearch::doOptimizeAt(
         if (limit.has_value()) {
             _spec.setLimit((int64_t)*limit);
         }
-        if (!_spec.getRequiresSearchSequenceToken().get_value_or(false)) {
+        if (!_spec.getRequiresSearchSequenceToken()) {
             _spec.setRequiresSearchSequenceToken(checkRequiresSearchSequenceToken(itr, container));
         }
     }

@@ -67,7 +67,7 @@ public:
             // Storage engine operations require at least Global IS.
             Lock::GlobalLock lk(_opCtx, MODE_IS);
             _originalTimestamp =
-                *shard_role_details::getRecoveryUnit(_opCtx)->getPointInTimeReadTimestamp(_opCtx);
+                *shard_role_details::getRecoveryUnit(_opCtx)->getPointInTimeReadTimestamp();
         }
 
         repl::ReadConcernArgs::get(_opCtx) = repl::ReadConcernArgs();
@@ -295,10 +295,17 @@ DocumentSource::GetNextResult DocumentSourceWriter<B>::doGetNext() {
                 }
             }
         } catch (ExceptionFor<ErrorCodes::StaleDbVersion>& e) {
+            // check whether the database still exists to distinguish between a movePrimary and drop
+            // database, we should re-throw a non-retriable error in the latter case.
+            auto targetDatabaseVersion =
+                pExpCtx->mongoProcessInterface->refreshAndGetDatabaseVersion(pExpCtx,
+                                                                             pExpCtx->ns.dbName());
+
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "database involved in aggregation write no longer exists: "
                                   << e->getDb().toStringForErrorMsg(),
-                    e->getVersionWanted());
+                    targetDatabaseVersion.has_value());
+
             // let the usual code path handle this error.
             throw;
         }

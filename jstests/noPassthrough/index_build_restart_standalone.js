@@ -7,6 +7,7 @@
  *   requires_replication,
  * ]
  */
+import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
 
 const rst = new ReplSetTest({
@@ -49,10 +50,10 @@ const createIndexCmd = IndexBuildTest.startIndexBuild(primary,
                                                       [ErrorCodes.InterruptedDueToReplStateChange]);
 IndexBuildTest.waitForIndexBuildToStart(secondaryDB, collName, indexName);
 
-// Wait for the lastDurable to advance, rather than lastApplied, so that the write is included in
-// the checkpoint taken on shutdown.
-jsTest.log("Wait for durable timestamps to advance.");
-rst.awaitReplication(undefined, ReplSetTest.OpTimeType.LAST_DURABLE);
+// Wait for the stable timestamps on each node to advance, so that the  write is included in the
+// stable checkpoint taken on shutdown.
+jsTest.log("Wait for stable timestamps to advance.");
+rst.awaitLastStableRecoveryTimestamp();
 
 TestData.skipCheckDBHashes = true;
 rst.stopSet(/*signal=*/ null, /*forRestart=*/ true);

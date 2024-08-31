@@ -5,59 +5,10 @@ Import("env")
 env = env.Clone()
 
 env.Library(
-    target="thread_pool",
-    source=[
-        "thread_pool.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
-env.Library(
     target="thread_pool_test_fixture",
     source=["thread_pool_test_common.cpp", "thread_pool_test_fixture.cpp"],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/unittest/unittest",
-    ],
-)
-
-env.Library(
-    target="ticketholder",
-    source=[
-        "priority_ticketholder.cpp" if env.TargetOSIs("linux") else [],
-        "semaphore_ticketholder.cpp",
-        "ticket_pool.cpp" if env.TargetOSIs("linux") else [],
-        "ticketholder.cpp",
-    ],
-    LIBDEPS=[
-        "admission_context",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
-        "$BUILD_DIR/mongo/db/service_context",
-        "$BUILD_DIR/third_party/shim_boost",
-    ],
-)
-
-env.Library(
-    target="admission_context",
-    source=[
-        "admission_context.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "spin_lock",
-    ],
-)
-
-env.Library(
-    target="spin_lock",
-    source=[
-        "spin_lock.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
     ],
 )
 

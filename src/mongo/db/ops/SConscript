@@ -11,14 +11,14 @@ env.Library(
         "insert.cpp",
         "update.cpp",
         "write_ops_retryability.cpp",
-        "single_write_result.idl",
+        "single_write_result_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/base",
         "$BUILD_DIR/mongo/db/concurrency/exception_util",
-        "$BUILD_DIR/mongo/db/introspect",
         "$BUILD_DIR/mongo/db/matcher/expressions_mongod_only",
         "$BUILD_DIR/mongo/db/mongod_options",
+        "$BUILD_DIR/mongo/db/profile_collection",
         "$BUILD_DIR/mongo/db/query/command_request_response",
         "$BUILD_DIR/mongo/db/query/query_stats/query_stats",
         "$BUILD_DIR/mongo/db/query_exec",
@@ -58,7 +58,7 @@ env.Library(
         "$BUILD_DIR/mongo/db/concurrency/exception_util",
         "$BUILD_DIR/mongo/db/curop_metrics",
         "$BUILD_DIR/mongo/db/dbhelpers",
-        "$BUILD_DIR/mongo/db/introspect",
+        "$BUILD_DIR/mongo/db/profile_collection",
         "$BUILD_DIR/mongo/db/query/query_settings/manager",
         "$BUILD_DIR/mongo/db/query/query_stats/query_stats",
         "$BUILD_DIR/mongo/db/record_id_helpers",
@@ -91,7 +91,7 @@ env.Library(
     target="write_ops_parsers",
     source=[
         "write_ops.cpp",
-        "write_ops.idl",
+        "write_ops_gen.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",
@@ -138,17 +138,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/server_base",
         "$BUILD_DIR/mongo/db/storage/storage_options",
-    ],
-)
-
-env.Library(
-    target="delete_request_idl",
-    source="delete_request.idl",
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
     ],
 )
 

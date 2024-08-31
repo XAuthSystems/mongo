@@ -213,7 +213,7 @@ auto makeTaskExecutor(ServiceContext* service,
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(service));
     auto networkName = threadName + "Network";
-    return std::make_unique<executor::ThreadPoolTaskExecutor>(
+    return executor::ThreadPoolTaskExecutor::create(
         makeThreadPool(poolName, threadName),
         executor::makeNetworkInterface(networkName, nullptr, std::move(hookList)));
 }
@@ -584,7 +584,7 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
         _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
 
         // Take an unstable checkpoint to ensure that the FCV document is persisted to disk.
-        shard_role_details::getRecoveryUnit(opCtx)->waitUntilUnjournaledWritesDurable(
+        _service->getStorageEngine()->waitUntilUnjournaledWritesDurable(
             opCtx, false /* stableCheckpoint */);
     } catch (const DBException& ex) {
         return ex.toStatus();

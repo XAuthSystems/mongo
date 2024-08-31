@@ -57,7 +57,7 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/query/establish_cursors.h"
+#include "mongo/s/query/exec/establish_cursors.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -256,7 +256,7 @@ BSONObj DocumentSourceChangeStreamHandleTopologyChange::createUpdatedCommandForN
     pipeline->optimizePipeline();
 
     // Split the full pipeline to get the shard pipeline.
-    auto splitPipelines = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+    auto splitPipelines = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
 
     // Create the new command that will run on the shard.
     return sharded_agg_helpers::createCommandForTargetedShards(pExpCtx,

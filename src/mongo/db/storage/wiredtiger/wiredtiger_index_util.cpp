@@ -149,11 +149,16 @@ StatusWith<int64_t> WiredTigerIndexUtil::compact(Interruptible& interruptible,
 bool WiredTigerIndexUtil::isEmpty(OperationContext* opCtx,
                                   const std::string& uri,
                                   uint64_t tableId) {
-    WiredTigerCursor curwrap(*WiredTigerRecoveryUnit::get(opCtx), uri, tableId, false);
+    WiredTigerCursor curwrap(
+        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
+        uri,
+        tableId,
+        false);
     WT_CURSOR* c = curwrap.get();
     if (!c)
         return true;
-    int ret = wiredTigerPrepareConflictRetry(opCtx, [&] { return c->next(c); });
+    int ret = wiredTigerPrepareConflictRetry(
+        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return c->next(c); });
     if (ret == WT_NOTFOUND)
         return true;
     invariantWTOK(ret, c->session);

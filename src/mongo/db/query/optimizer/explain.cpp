@@ -59,13 +59,12 @@
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/bool_expression.h"
-#include "mongo/db/query/optimizer/cascades/memo_defs.h"
-#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
 #include "mongo/db/query/optimizer/utils/path_utils.h"
@@ -113,10 +112,8 @@ BSONObj ABTPrinter::explainBSON() const {
             return explainPlanStr(ExplainGenerator::explainV2Compact(_planAndProps._node));
 
         case ExplainVersion::V3:
-            return ExplainGenerator::explainBSONObj(_planAndProps._node,
-                                                    true /*displayProperties*/,
-                                                    nullptr /*memoInterface*/,
-                                                    _planAndProps._map);
+            return ExplainGenerator::explainBSONObj(
+                _planAndProps._node, true /*displayProperties*/, _planAndProps._map);
 
         case ExplainVersion::UserFacingExplain: {
             UserFacingExplain ex(_planAndProps._map);
@@ -178,7 +175,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
             const QueryPlannerOptimizationStagesForDebugExplain& queryPlannerOptimizationStages,
             auto (*func)(const ABT::reference_type node,
                          const bool displayProperties,
-                         const cascades::MemoExplainInterface* memoInterface,
                          const NodeToGroupPropsMap& nodeMap)) {
             BSONArrayBuilder builder;
 
@@ -187,7 +183,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
                     explainPlan("logicalTranslated",
                                 func(queryPlannerOptimizationStages._logicalTranslated.get(),
                                      false /*displayProperties*/,
-                                     nullptr /*memoInterface*/,
                                      {} /*nodeMap*/)));
             }
 
@@ -196,7 +191,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
                     "logicalStructuralRewrites",
                     func(queryPlannerOptimizationStages._logicalStructuralRewrites.get(),
                          false /*displayProperties*/,
-                         nullptr /*memoInterface*/,
                          {} /*nodeMap*/)));
             }
 
@@ -205,7 +199,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
                     explainPlan("logicalMemoSubstitution",
                                 func(queryPlannerOptimizationStages._logicalMemoSub.get()._node,
                                      displayProperties /*displayProperties*/,
-                                     nullptr /*memoInterface*/,
                                      queryPlannerOptimizationStages._logicalMemoSub.get()._map)));
             }
 
@@ -214,7 +207,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
                     explainPlan("physical",
                                 func(queryPlannerOptimizationStages._physical.get()._node,
                                      displayProperties /*displayProperties*/,
-                                     nullptr /*memoInterface*/,
                                      queryPlannerOptimizationStages._physical.get()._map)));
             }
 
@@ -223,7 +215,6 @@ BSONObj ABTPrinter::explainQueryPlannerDebug() const {
                     explainPlan("physicalLowered",
                                 func(queryPlannerOptimizationStages._physicalLowered.get()._node,
                                      displayProperties /*displayProperties*/,
-                                     nullptr /*memoInterface*/,
                                      queryPlannerOptimizationStages._physicalLowered.get()._map)));
             }
 
@@ -855,17 +846,12 @@ public:
     using ExplainPrinter = ExplainPrinterImpl<version>;
 
     ExplainGeneratorTransporter(bool displayProperties = false,
-                                const cascades::MemoExplainInterface* memoInterface = nullptr,
                                 const NodeToGroupPropsMap& nodeMap = {},
                                 const boost::optional<const NodeCEMap&>& nodeCEMap = boost::none)
-        : _displayProperties(displayProperties),
-          _memoInterface(memoInterface),
-          _nodeMap(nodeMap),
-          _nodeCEMap(nodeCEMap) {
+        : _displayProperties(displayProperties), _nodeMap(nodeMap), _nodeCEMap(nodeCEMap) {
         uassert(6624005,
-                "Memo must be provided in order to display properties.",
-                !_displayProperties ||
-                    (_memoInterface != nullptr || version == ExplainVersion::V3));
+                "Displaying properties not supported, in the process of being deleted",
+                !_displayProperties);
     }
 
     /**
@@ -918,8 +904,7 @@ public:
                 !(_displayProperties && _nodeCEMap));
         // Only allow in V2 and V3 explain. No point in printing CE when we have a delegator
         // node.
-        if (!_nodeCEMap || version == ExplainVersion::V1 || n.is<MemoLogicalDelegatorNode>() ||
-            n.is<MemoPhysicalDelegatorNode>()) {
+        if (!_nodeCEMap || version == ExplainVersion::V1) {
             return;
         }
         auto it = _nodeCEMap->find(&node);
@@ -1563,69 +1548,6 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT::reference_type n, const MemoLogicalDelegatorNode& node) {
-        ExplainPrinter printer("MemoLogicalDelegator");
-        maybePrintProps(printer, node);
-        printer.separator(" [").fieldName("groupId").print(node.getGroupId()).separator("]");
-        nodeCEPropsPrint(printer, n, node);
-        return printer;
-    }
-
-    ExplainPrinter transport(const ABT::reference_type /*n*/,
-                             const MemoPhysicalDelegatorNode& node) {
-        const auto id = node.getNodeId();
-
-        if (_displayProperties) {
-            const auto& result = *_memoInterface->getPhysicalNodes(id._groupId).at(id._index);
-            uassert(6624076,
-                    "Physical delegator must be pointing to an optimized result.",
-                    result._nodeInfo.has_value());
-
-            const auto& nodeInfo = *result._nodeInfo;
-            const ABT& n = nodeInfo._node;
-
-            ExplainPrinter nodePrinter = generate(n);
-            if (n.template is<MemoPhysicalDelegatorNode>()) {
-                // Handle delegation.
-                return nodePrinter;
-            }
-
-            ExplainPrinter logPropPrinter =
-                printLogicalProps("Logical", _memoInterface->getLogicalProps(id._groupId));
-            ExplainPrinter physPropPrinter = printPhysProps("Physical", result._physProps);
-
-            ExplainPrinter printer("Properties");
-            printer.separator(" [")
-                .fieldName("cost")
-                .print(nodeInfo._cost.getCost())
-                .separator(", ")
-                .fieldName("localCost")
-                .print(nodeInfo._localCost.getCost())
-                .separator(", ")
-                .fieldName("adjustedCE")
-                .print(nodeInfo._adjustedCE)
-                .separator("]")
-                .setChildCount(3)
-                .fieldName("logicalProperties", ExplainVersion::V3)
-                .print(logPropPrinter)
-                .fieldName("physicalProperties", ExplainVersion::V3)
-                .print(physPropPrinter)
-                .fieldName("node", ExplainVersion::V3)
-                .print(nodePrinter);
-            return printer;
-        }
-
-        ExplainPrinter printer("MemoPhysicalDelegator");
-        printer.separator(" [")
-            .fieldName("groupId")
-            .print(id._groupId)
-            .separator(", ")
-            .fieldName("index")
-            .print(id._index)
-            .separator("]");
-        return printer;
-    }
-
     ExplainPrinter transport(const ABT::reference_type n,
                              const FilterNode& node,
                              ExplainPrinter childResult,
@@ -1698,93 +1620,6 @@ public:
         ExplainPrinter residualReqsPrinter;
         BoolExprPrinter<ResidualRequirement>{printFn}.print(residualReqsPrinter, residualReqs);
         parent.fieldName("residualReqs").print(residualReqsPrinter);
-    }
-
-    ExplainPrinter transport(const ABT::reference_type n,
-                             const SargableNode& node,
-                             ExplainPrinter childResult,
-                             ExplainPrinter bindResult,
-                             ExplainPrinter refsResult) {
-        const auto& scanParams = node.getScanParams();
-
-        ExplainPrinter printer("Sargable");
-        maybePrintProps(printer, node);
-        printer.separator(" [")
-            .fieldName("target", ExplainVersion::V3)
-            .print(toStringData(node.getTarget()))
-            .separator("]");
-        nodeCEPropsPrint(printer, n, node);
-
-        size_t childCount = 2;
-        if (scanParams) {
-            childCount++;
-        }
-        if (!node.getCandidateIndexes().empty()) {
-            childCount++;
-        }
-        // In V3 only we include the bind block and ref block (see at the end of this function), so
-        // V3 has two more children.
-        if constexpr (version == ExplainVersion::V3) {
-            childCount += 2;
-        }
-        printer.setChildCount(childCount);
-
-        if constexpr (version < ExplainVersion::V3) {
-            ExplainPrinter local;
-            printPartialSchemaReqMap(local, node.getReqMap());
-            printer.print(local);
-        } else if constexpr (version == ExplainVersion::V3) {
-            printPartialSchemaReqMap(printer, node.getReqMap());
-        } else {
-            MONGO_UNREACHABLE;
-        }
-
-        if (const auto& candidateIndexes = node.getCandidateIndexes(); !candidateIndexes.empty()) {
-            std::vector<ExplainPrinter> candidateIndexesPrinters;
-            for (size_t index = 0; index < candidateIndexes.size(); index++) {
-                const CandidateIndexEntry& candidateIndexEntry = candidateIndexes.at(index);
-
-                ExplainPrinter local;
-                local.fieldName("candidateId").print(index + 1).separator(", ");
-                printCandidateIndexEntry(local, candidateIndexEntry);
-                candidateIndexesPrinters.push_back(std::move(local));
-            }
-            ExplainPrinter candidateIndexesPrinter;
-            candidateIndexesPrinter.fieldName("candidateIndexes").print(candidateIndexesPrinters);
-            printer.printAppend(candidateIndexesPrinter);
-        }
-
-        if (scanParams) {
-            ExplainPrinter local;
-            local.separator("{");
-            printFieldProjectionMap(local, scanParams->_fieldProjectionMap);
-            local.separator("}");
-
-            if (const auto& residualReqs = scanParams->_residualRequirements) {
-                if constexpr (version < ExplainVersion::V3) {
-                    ExplainPrinter residualReqMapPrinter;
-                    printResidualRequirements(residualReqMapPrinter, *residualReqs);
-                    local.print(residualReqMapPrinter);
-                } else if (version == ExplainVersion::V3) {
-                    printResidualRequirements(local, *residualReqs);
-                } else {
-                    MONGO_UNREACHABLE;
-                }
-            }
-
-            ExplainPrinter scanParamsPrinter;
-            scanParamsPrinter.fieldName("scanParams").print(local);
-            printer.printAppend(scanParamsPrinter);
-        }
-
-        if constexpr (version == ExplainVersion::V3) {
-            printer.fieldName("bindings")
-                .print(bindResult)
-                .fieldName("references")
-                .print(refsResult);
-        }
-        printer.fieldName("child", ExplainVersion::V3).print(childResult);
-        return printer;
     }
 
     ExplainPrinter transport(const ABT::reference_type n,
@@ -2251,36 +2086,6 @@ public:
         return printer;
     }
 
-    static void printLimitSkipProperty(ExplainPrinter& propPrinter,
-                                       ExplainPrinter& limitPrinter,
-                                       ExplainPrinter& skipPrinter,
-                                       const properties::LimitSkipRequirement& property) {
-        propPrinter.fieldName("propType", ExplainVersion::V3)
-            .print("limitSkip")
-            .separator(":")
-            .printAppend(limitPrinter)
-            .printAppend(skipPrinter);
-    }
-
-    static void printLimitSkipProperty(ExplainPrinter& parent,
-                                       const properties::LimitSkipRequirement& property,
-                                       const bool directToParent) {
-        ExplainPrinter limitPrinter;
-        limitPrinter.fieldName("limit");
-        if (property.hasLimit()) {
-            limitPrinter.print(property.getLimit());
-        } else {
-            limitPrinter.print("(none)");
-        }
-
-        ExplainPrinter skipPrinter;
-        skipPrinter.fieldName("skip").print(property.getSkip());
-
-        printDirectToParentHelper(directToParent, parent, [&](ExplainPrinter& printer) {
-            printLimitSkipProperty(printer, limitPrinter, skipPrinter, property);
-        });
-    }
-
     ExplainPrinter transport(const ABT::reference_type n,
                              const LimitSkipNode& node,
                              ExplainPrinter childResult) {
@@ -2290,14 +2095,14 @@ public:
 
         // If we have version < V3, inline the limit skip.
         if constexpr (version < ExplainVersion::V3) {
-            const auto& prop = node.getProperty();
             printer.fieldName("limit");
-            if (prop.hasLimit()) {
-                printer.print(prop.getLimit());
-            } else {
+            auto limit = node.getLimit();
+            if (limit == LimitSkipNode::kMaxVal) {
                 printer.print("(none)");
+            } else {
+                printer.print(limit);
             }
-            printer.separator(", ").fieldName("skip").print(prop.getSkip()).separator("]");
+            printer.separator(", ").fieldName("skip").print(node.getSkip()).separator("]");
             nodeCEPropsPrint(printer, n, node);
             // Do not inline LimitSkip, since it's not a path.
             printer.setChildCount(1, true /*noInline*/);
@@ -2305,7 +2110,14 @@ public:
             printer.separator("]");
             nodeCEPropsPrint(printer, n, node);
             printer.setChildCount(2);
-            printLimitSkipProperty(printer, node.getProperty(), false /*directToParent*/);
+            printer.fieldName("limit");
+            auto limit = node.getLimit();
+            if (limit == LimitSkipNode::kMaxVal) {
+                printer.print("(none)");
+            } else {
+                printer.print(limit);
+            }
+            printer.separator(", ").fieldName("skip").print(node.getSkip()).separator("]");
         } else {
             MONGO_UNREACHABLE;
         }
@@ -2535,11 +2347,6 @@ public:
         void operator()(const properties::PhysProperty&,
                         const properties::CollationRequirement& prop) {
             printCollationProperty(_parent, prop, true /*directToParent*/);
-        }
-
-        void operator()(const properties::PhysProperty&,
-                        const properties::LimitSkipRequirement& prop) {
-            printLimitSkipProperty(_parent, prop, true /*directToParent*/);
         }
 
         void operator()(const properties::PhysProperty&,
@@ -3027,120 +2834,10 @@ public:
         return algebra::transport<true>(node, *this);
     }
 
-    void printPhysNodeInfo(ExplainPrinter& printer, const cascades::PhysNodeInfo& nodeInfo) {
-        printer.fieldName("cost");
-        if (nodeInfo._cost.isInfinite()) {
-            printer.print(nodeInfo._cost.toString());
-        } else {
-            printer.print(nodeInfo._cost.getCost());
-        }
-        printer.separator(", ")
-            .fieldName("localCost")
-            .print(nodeInfo._localCost.getCost())
-            .separator(", ")
-            .fieldName("adjustedCE")
-            .print(nodeInfo._adjustedCE)
-            .separator(", ")
-            .fieldName("rule")
-            .print(cascades::toStringData(nodeInfo._rule));
-
-        ExplainGeneratorTransporter<version> subGen(
-            _displayProperties, _memoInterface, _nodeMap, nodeInfo._nodeCEMap);
-        ExplainPrinter nodePrinter = subGen.generate(nodeInfo._node);
-        printer.separator(", ").fieldName("node").print(nodePrinter);
-    }
-
-    ExplainPrinter printMemo() {
-        std::vector<ExplainPrinter> groupPrinters;
-        for (size_t groupId = 0; groupId < _memoInterface->getGroupCount(); groupId++) {
-            ExplainPrinter groupPrinter;
-            groupPrinter.fieldName("groupId").print(groupId).setChildCount(3);
-            {
-                ExplainPrinter logicalPropPrinter = printLogicalProps(
-                    "Logical properties", _memoInterface->getLogicalProps(groupId));
-                groupPrinter.fieldName("logicalProperties", ExplainVersion::V3)
-                    .print(logicalPropPrinter);
-            }
-
-            {
-                std::vector<ExplainPrinter> logicalNodePrinters;
-                const ABTVector& logicalNodes = _memoInterface->getLogicalNodes(groupId);
-                for (size_t i = 0; i < logicalNodes.size(); i++) {
-                    ExplainPrinter local;
-                    local.fieldName("logicalNodeId").print(i).separator(", ");
-                    const auto rule = _memoInterface->getRules(groupId).at(i);
-                    local.fieldName("rule").print(cascades::toStringData(rule));
-
-                    ExplainPrinter nodePrinter = generate(logicalNodes.at(i));
-                    local.fieldName("node", ExplainVersion::V3).print(nodePrinter);
-
-                    logicalNodePrinters.push_back(std::move(local));
-                }
-                ExplainPrinter logicalNodePrinter;
-                logicalNodePrinter.print(logicalNodePrinters);
-
-                groupPrinter.fieldName("logicalNodes").print(logicalNodePrinter);
-            }
-
-            {
-                std::vector<ExplainPrinter> physicalNodePrinters;
-                for (const auto& physOptResult : _memoInterface->getPhysicalNodes(groupId)) {
-                    ExplainPrinter local;
-                    local.fieldName("physicalNodeId")
-                        .print(physOptResult->_index)
-                        .separator(", ")
-                        .fieldName("costLimit");
-
-                    if (physOptResult->_costLimit.isInfinite()) {
-                        local.print(physOptResult->_costLimit.toString());
-                    } else {
-                        local.print(physOptResult->_costLimit.getCost());
-                    }
-
-                    ExplainPrinter propPrinter =
-                        printPhysProps("Physical properties", physOptResult->_physProps);
-                    local.fieldName("physicalProperties", ExplainVersion::V3).print(propPrinter);
-
-                    if (physOptResult->_nodeInfo) {
-                        ExplainPrinter local1;
-                        printPhysNodeInfo(local1, *physOptResult->_nodeInfo);
-
-                        if (!physOptResult->_rejectedNodeInfo.empty()) {
-                            std::vector<ExplainPrinter> rejectedPrinters;
-                            for (const auto& rejectedPlan : physOptResult->_rejectedNodeInfo) {
-                                ExplainPrinter local2;
-                                printPhysNodeInfo(local2, rejectedPlan);
-                                rejectedPrinters.emplace_back(std::move(local2));
-                            }
-                            local1.fieldName("rejectedPlans").print(rejectedPrinters);
-                        }
-
-                        local.fieldName("nodeInfo", ExplainVersion::V3).print(local1);
-                    } else {
-                        local.separator(" (failed to optimize)");
-                    }
-
-                    physicalNodePrinters.push_back(std::move(local));
-                }
-                ExplainPrinter physNodePrinter;
-                physNodePrinter.print(physicalNodePrinters);
-
-                groupPrinter.fieldName("physicalNodes").print(physNodePrinter);
-            }
-
-            groupPrinters.push_back(std::move(groupPrinter));
-        }
-
-        ExplainPrinter printer;
-        printer.fieldName("Memo").print(groupPrinters);
-        return printer;
-    }
-
 private:
     const bool _displayProperties;
 
     // We don't own this.
-    const cascades::MemoExplainInterface* _memoInterface;
     const NodeToGroupPropsMap& _nodeMap;
     boost::optional<const NodeCEMap&> _nodeCEMap;
 };
@@ -3152,25 +2849,22 @@ using ExplainGeneratorV3 = ExplainGeneratorTransporter<ExplainVersion::V3>;
 
 std::string ExplainGenerator::explain(const ABT::reference_type node,
                                       const bool displayProperties,
-                                      const cascades::MemoExplainInterface* memoInterface,
                                       const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorV1 gen(displayProperties, memoInterface, nodeMap);
+    ExplainGeneratorV1 gen(displayProperties, nodeMap);
     return gen.generate(node).str();
 }
 
 std::string ExplainGenerator::explainV2(const ABT::reference_type node,
                                         const bool displayProperties,
-                                        const cascades::MemoExplainInterface* memoInterface,
                                         const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorV2 gen(displayProperties, memoInterface, nodeMap);
+    ExplainGeneratorV2 gen(displayProperties, nodeMap);
     return gen.generate(node).str();
 }
 
 std::string ExplainGenerator::explainV2Compact(const ABT::reference_type node,
                                                const bool displayProperties,
-                                               const cascades::MemoExplainInterface* memoInterface,
                                                const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorV2Compact gen(displayProperties, memoInterface, nodeMap);
+    ExplainGeneratorV2Compact gen(displayProperties, nodeMap);
     return gen.generate(node).str();
 }
 
@@ -3184,9 +2878,8 @@ std::string ExplainGenerator::explainNode(const ABT::reference_type node) {
 std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainBSON(
     const ABT::reference_type node,
     const bool displayProperties,
-    const cascades::MemoExplainInterface* memoInterface,
     const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorV3 gen(displayProperties, memoInterface, nodeMap);
+    ExplainGeneratorV3 gen(displayProperties, nodeMap);
     return gen.generate(node).moveValue();
 }
 
@@ -3201,9 +2894,8 @@ BSONObj convertSbeValToBSONObj(const std::pair<sbe::value::TypeTags, sbe::value:
 
 BSONObj ExplainGenerator::explainBSONObj(const ABT::reference_type node,
                                          const bool displayProperties,
-                                         const cascades::MemoExplainInterface* memoInterface,
                                          const NodeToGroupPropsMap& nodeMap) {
-    return convertSbeValToBSONObj(explainBSON(node, displayProperties, memoInterface, nodeMap));
+    return convertSbeValToBSONObj(explainBSON(node, displayProperties, nodeMap));
 }
 
 template <class PrinterType>
@@ -3256,9 +2948,8 @@ static void printBSONstr(PrinterType& printer,
 
 std::string ExplainGenerator::explainBSONStr(const ABT::reference_type node,
                                              bool displayProperties,
-                                             const cascades::MemoExplainInterface* memoInterface,
                                              const NodeToGroupPropsMap& nodeMap) {
-    const auto [tag, val] = explainBSON(node, displayProperties, memoInterface, nodeMap);
+    const auto [tag, val] = explainBSON(node, displayProperties, nodeMap);
     sbe::value::ValueGuard vg(tag, val);
     ExplainPrinterImpl<ExplainVersion::V2> printer;
     printBSONstr(printer, tag, val);
@@ -3273,17 +2964,6 @@ std::string ExplainGenerator::explainLogicalProps(const std::string& description
 std::string ExplainGenerator::explainPhysProps(const std::string& description,
                                                const properties::PhysProps& props) {
     return ExplainGeneratorV2::printPhysProps(description, props).str();
-}
-
-std::string ExplainGenerator::explainMemo(const cascades::MemoExplainInterface& memoInterface) {
-    ExplainGeneratorV2 gen(false /*displayProperties*/, &memoInterface);
-    return gen.printMemo().str();
-}
-
-std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainMemoBSON(
-    const cascades::MemoExplainInterface& memoInterface) {
-    ExplainGeneratorV3 gen(false /*displayProperties*/, &memoInterface);
-    return gen.printMemo().moveValue();
 }
 
 class ShortPlanSummaryTransport {
@@ -3351,10 +3031,6 @@ std::string ABTPrinter::getPlanSummary() const {
     return ShortPlanSummaryTransport(_metadata).getPlanSummary(_planAndProps._node);
 }
 
-BSONObj ExplainGenerator::explainMemoBSONObj(const cascades::MemoExplainInterface& memoInterface) {
-    return convertSbeValToBSONObj(explainMemoBSON(memoInterface));
-}
-
 std::string ExplainGenerator::explainPartialSchemaReqExpr(const PSRExpr::Node& reqs) {
     ExplainGeneratorV2 gen;
     ExplainGeneratorV2::ExplainPrinter result;
@@ -3411,7 +3087,7 @@ bool isEOFPlan(const ABT::reference_type node) {
     }
 
     // This is the rest of an EOF plan.
-    ABT eofChild = make<LimitSkipNode>(properties::LimitSkipRequirement{0, 0}, make<CoScanNode>());
+    ABT eofChild = make<LimitSkipNode>(0, 0, make<CoScanNode>());
     return eval->getChild() == eofChild;
 }
 

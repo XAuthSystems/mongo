@@ -55,6 +55,8 @@
 
 namespace mongo {
 
+inline constexpr auto kWiredTigerEngineName = "wiredTiger"_sd;
+
 class BSONObjBuilder;
 class OperationContext;
 class WiredTigerConfigParser;
@@ -201,6 +203,7 @@ public:
      * true. This function should only be used for tests.
      */
     bool getWtConnReadyStatus() {
+        stdx::unique_lock<mongo::Mutex> lock(_mutex);
         return _wtConnReady;
     }
 

@@ -66,8 +66,6 @@ buildvariants:
       compile_flags: >-
         --ssl
         MONGO_DISTMOD=windows
-        CPPPATH="c:/sasl/include"
-        LIBPATH="c:/sasl/lib"
         -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
         --win-version-min=win10
       num_scons_link_jobs_available: 0.2
@@ -111,7 +109,7 @@ buildvariants:
     display_name: Enterprise Windows Server 2022 Security
     tags: []
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
         variant: *enterprise-windows
     tasks:
       - name: external_auth_windows

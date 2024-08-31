@@ -43,18 +43,14 @@
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/timer.h"
@@ -65,8 +61,6 @@ using RoundUpPreparedTimestamps = WiredTigerBeginTxnBlock::RoundUpPreparedTimest
 using RoundUpReadTimestamp = WiredTigerBeginTxnBlock::RoundUpReadTimestamp;
 
 extern AtomicWord<std::int64_t> snapshotTooOldErrorCount;
-
-class BSONObjBuilder;
 
 class WiredTigerRecoveryUnit final : public RecoveryUnit {
 public:
@@ -84,15 +78,12 @@ public:
 
     void prepareUnitOfWork() override;
 
-    bool waitUntilDurable(OperationContext* opCtx) override;
-
-    bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
-
-    void preallocateSnapshot() override;
+    void preallocateSnapshot(
+        const OpenSnapshotOptions& options = kDefaultOpenSnapshotOptions) override;
 
     Status majorityCommittedSnapshotAvailable() const override;
 
-    boost::optional<Timestamp> getPointInTimeReadTimestamp(OperationContext* opCtx) override;
+    boost::optional<Timestamp> getPointInTimeReadTimestamp() override;
 
     Status setTimestamp(Timestamp timestamp) override;
 
@@ -117,10 +108,6 @@ public:
     void setPrepareConflictBehavior(PrepareConflictBehavior behavior) override;
 
     PrepareConflictBehavior getPrepareConflictBehavior() const override;
-
-    void setRoundUpPreparedTimestamps(bool value) override;
-
-    bool getRoundUpPreparedTimestamps() override;
 
     /**
      * Set pre-fetching capabilities for this session. This allows pre-loading of a set of pages
@@ -207,8 +194,12 @@ public:
     boost::optional<int64_t> getOplogVisibilityTs() override;
     void setOplogVisibilityTs(boost::optional<int64_t> oplogVisibilityTs) override;
 
-    static WiredTigerRecoveryUnit* get(OperationContext* opCtx) {
-        return checked_cast<WiredTigerRecoveryUnit*>(shard_role_details::getRecoveryUnit(opCtx));
+    static WiredTigerRecoveryUnit& get(RecoveryUnit& ru) {
+        return checked_cast<WiredTigerRecoveryUnit&>(ru);
+    }
+
+    static WiredTigerRecoveryUnit* get(RecoveryUnit* ru) {
+        return checked_cast<WiredTigerRecoveryUnit*>(ru);
     }
 
     bool gatherWriteContextForDebugging() const;
@@ -292,8 +283,6 @@ private:
 
     // The behavior of handling prepare conflicts.
     PrepareConflictBehavior _prepareConflictBehavior{PrepareConflictBehavior::kEnforce};
-    // Dictates whether to round up prepare and commit timestamp of a prepared transaction.
-    RoundUpPreparedTimestamps _roundUpPreparedTimestamps{RoundUpPreparedTimestamps::kNoRound};
     Timestamp _commitTimestamp;
     Timestamp _durableTimestamp;
     Timestamp _prepareTimestamp;
@@ -312,6 +301,9 @@ private:
     WiredTigerStats _sessionStatsAfterLastOperation;
 
     Milliseconds _cacheMaxWaitTimeout{0};
+
+    // Detects any attempt to reconfigure options used by an open transaction.
+    OpenSnapshotOptions _optionsUsedToOpenSnapshot;
 };
 
 }  // namespace mongo
