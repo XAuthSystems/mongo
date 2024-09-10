@@ -32,7 +32,6 @@
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -52,7 +51,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
@@ -62,7 +60,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
@@ -83,13 +80,13 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/query_settings/query_settings_utils.h"
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_stats/distinct_key.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -111,7 +108,6 @@
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
 #include "mongo/util/serialization_context.h"
@@ -124,6 +120,7 @@ namespace {
 
 std::unique_ptr<CanonicalQuery> parseDistinctCmd(
     OperationContext* opCtx,
+    const CollectionOrViewAcquisition& collOrViewAcquisition,
     const NamespaceString& nss,
     const BSONObj& cmdObj,
     const ExtensionsCallback& extensionsCallback,
@@ -152,18 +149,33 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
 
     auto parsedDistinct =
         parsed_distinct_command::parse(expCtx,
-                                       cmdObj,
                                        std::move(distinctCommand),
                                        extensionsCallback,
                                        MatchExpressionParser::kAllowAllSpecialFeatures);
+
+    // We do not collect queryStats on explain for distinct.
+    if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !verbosity.has_value()) {
+        query_stats::registerRequest(opCtx, nss, [&]() {
+            return std::make_unique<query_stats::DistinctKey>(
+                expCtx, *parsedDistinct, collOrViewAcquisition.getCollectionType());
+        });
+
+        if (parsedDistinct->distinctCommandRequest->getIncludeQueryStatsMetrics() &&
+            feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
+        }
+    }
 
     // TODO: SERVER-73632 Remove feature flag for PM-635.
     // Query settings will only be looked up on mongos and therefore should be part of command body
     // on mongod if present.
     expCtx->setQuerySettingsIfNotPresent(
         query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
-    return parsed_distinct_command::parseCanonicalQuery(std::move(expCtx),
-                                                        std::move(parsedDistinct));
+    return parsed_distinct_command::parseCanonicalQuery(
+        std::move(expCtx), std::move(parsedDistinct), nullptr);
 }
 
 namespace dps = dotted_path_support;
@@ -179,38 +191,32 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> createExecutorForDistinctCo
     const auto& collectionPtr = coll.getCollectionPtr();
     const MultipleCollectionAccessor collections{coll};
 
-    // If the collection doesn't exist 'getExecutor()' should create an EOF plan for it no matter
-    // the query.
-    if (!collectionPtr) {
-        return uassertStatusOK(
-            getExecutorFind(opCtx, collections, std::move(canonicalQuery), yieldPolicy));
-    }
-
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    bool isDistinctMultiplanningEnabled = feature_flags::gFeatureFlagShardFilteringDistinctScan
-                                              .isEnabledUseLastLTSFCVWhenUninitialized(fcvSnapshot);
-
-    // Try creating a plan that does DISTINCT_SCAN.
-    auto swQuerySolution = tryGetQuerySolutionForDistinct(
-        collections, QueryPlannerParams::DEFAULT, *canonicalQuery, isDistinctMultiplanningEnabled);
-    if (swQuerySolution.isOK()) {
-        return uassertStatusOK(getExecutorDistinct(collections,
-                                                   QueryPlannerParams::DEFAULT,
-                                                   std::move(canonicalQuery),
-                                                   std::move(swQuerySolution.getValue())));
-    }
-
-    // TODO SERVER-93059: Investigate whether to keep the projection field of the canonical query
-    // when multiplanning is enabled.
-    if (isDistinctMultiplanningEnabled) {
+    if (canonicalQuery->getExpCtx()->isFeatureFlagShardFilteringDistinctScanEnabled()) {
         return uassertStatusOK(
             getExecutorFind(opCtx,
                             collections,
                             std::move(canonicalQuery),
                             yieldPolicy,
                             // TODO SERVER-93018: Investigate why we prefer a collection scan
-                            // against a GENERATE_COVERED_IXSCANS when no filter is present.
+                            // against a 'GENERATE_COVERED_IXSCANS' when no filter is present.
                             QueryPlannerParams::DEFAULT));
+    }
+
+    // If the collection doesn't exist 'getExecutor()' should create an EOF plan for it no
+    // matter the query.
+    if (!collectionPtr) {
+        return uassertStatusOK(
+            getExecutorFind(opCtx, collections, std::move(canonicalQuery), yieldPolicy));
+    }
+
+    // Try creating a plan that does DISTINCT_SCAN.
+    auto swQuerySolution =
+        tryGetQuerySolutionForDistinct(collections, QueryPlannerParams::DEFAULT, *canonicalQuery);
+    if (swQuerySolution.isOK()) {
+        return uassertStatusOK(getExecutorDistinct(collections,
+                                                   QueryPlannerParams::DEFAULT,
+                                                   std::move(canonicalQuery),
+                                                   std::move(swQuerySolution.getValue())));
     }
 
     // If there is no DISTINCT_SCAN plan, create whatever non-distinct plan is appropriate, because
@@ -347,8 +353,13 @@ public:
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
 
-        auto canonicalQuery = parseDistinctCmd(
-            opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollator, verbosity);
+        auto canonicalQuery = parseDistinctCmd(opCtx,
+                                               *collectionOrView,
+                                               nss,
+                                               cmdObj,
+                                               ExtensionsCallbackReal(opCtx, &nss),
+                                               defaultCollator,
+                                               verbosity);
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -439,8 +450,13 @@ public:
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
 
-        auto canonicalQuery = parseDistinctCmd(
-            opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollation, {});
+        auto canonicalQuery = parseDistinctCmd(opCtx,
+                                               *collectionOrView,
+                                               nss,
+                                               cmdObj,
+                                               ExtensionsCallbackReal(opCtx, &nss),
+                                               defaultCollation,
+                                               {});
         const CanonicalDistinct& canonicalDistinct = *canonicalQuery->getDistinct();
 
         if (canonicalDistinct.isMirrored()) {
@@ -541,7 +557,9 @@ public:
         if (collection) {
             CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, stats);
         }
+
         curOp->debug().setPlanSummaryMetrics(std::move(stats));
+        curOp->setEndOfOpMetrics(values.size());
 
         if (curOp->shouldDBProfile()) {
             auto&& [stats, _] =
@@ -563,6 +581,24 @@ public:
         }
 
         uassert(31299, "distinct too big, 16mb cap", result.len() < kMaxResponseSize);
+
+        auto* cq = executor->getCanonicalQuery();
+        collectQueryStatsMongod(
+            opCtx, cq->getExpCtx(), std::move(curOp->debug().queryStatsInfo.key));
+
+        // Include queryStats metrics in the result to be sent to mongos.
+        const bool includeMetrics = CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested;
+
+        if (includeMetrics) {
+            auto metrics = CurOp::get(opCtx)->debug().getCursorMetrics().toBSON();
+
+            // Only append the metrics if they were requested and they do not cause the result to
+            // exceed max size.
+            if (result.len() + metrics.objsize() < kMaxResponseSize) {
+                result.append("metrics", metrics);
+            }
+        }
+
         return true;
     }
 
@@ -599,6 +635,13 @@ public:
             viewAggCmd, vts, verbosity, serializationContext);
         viewAggRequest.setQuerySettings(canonicalQuery->getExpCtx()->getQuerySettings());
 
+        auto curOp = CurOp::get(opCtx);
+
+        // We must store the key in distinct to prevent collecting query stats when the aggregation
+        // runs.
+        auto ownedQueryStatsKey = std::move(curOp->debug().queryStatsInfo.key);
+        curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+
         // If running explain distinct on view, then aggregate is executed without privilege checks
         // and without response formatting.
         if (verbosity) {
@@ -632,8 +675,21 @@ public:
 
         // Reset the builder state, as the response will be written to the same builder.
         resultBuilder.resetToEmpty();
+
+        // Include queryStats metrics in the result to be sent to mongos. While most views for
+        // distinct on mongos will run through an aggregate pipeline on mongos, views on collections
+        // that can be read completely locally, such as non-existent database collections or
+        // unsplittable collections, will run through this distinct path on mongod and return
+        // metrics back to mongos.
+        const bool includeMetrics = curOp->debug().queryStatsInfo.metricsRequested;
+        boost::optional<BSONObj> metrics = includeMetrics
+            ? boost::make_optional(curOp->debug().getCursorMetrics().toBSON())
+            : boost::none;
         uassertStatusOK(
-            responseFormatter.appendAsDistinctResponse(&resultBuilder, dbName.tenantId()));
+            responseFormatter.appendAsDistinctResponse(&resultBuilder, dbName.tenantId(), metrics));
+
+        curOp->setEndOfOpMetrics(resultBuilder.asTempObj().getObjectField("values").nFields());
+        collectQueryStatsMongod(opCtx, canonicalQuery->getExpCtx(), std::move(ownedQueryStatsKey));
     }
 
     void appendMirrorableRequest(BSONObjBuilder* bob, const BSONObj& cmdObj) const override {

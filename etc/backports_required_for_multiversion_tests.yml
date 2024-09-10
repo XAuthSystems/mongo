@@ -21,6 +21,16 @@
 #
 last-continuous:
   all:
+    - test_file: jstests/change_streams/ddl_create_event.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/ddl_view_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/resume_expanded_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/show_expanded_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/timeseries.js
+      ticket: SERVER-88142
     - test_file: jstests/aggregation/bugs/lookup_using_hashed_index.js
       ticket: SERVER-92668
     - test_file: jstests/core/query/query_settings/query_settings_strictness.js
@@ -187,6 +197,12 @@ last-continuous:
       ticket: SERVER-91465
     - test_file: jstests/aggregation/bugs/add_fields_adds_to_missing_fields.js
       ticket: SERVER-91784
+    - test_file: jstests/aggregation/group_with_acc_n_to_distinct_scan.js
+      ticket: SERVER-90017
+    - test_file: jstests/core/query/query_settings/query_settings_cmds_validation.js
+      ticket: SERVER-90965
+    - test_file: jstests/core/query/query_settings/query_settings_cmds.js
+      ticket: SERVER-90965
     - test_file: jstests/core/query/index_deduplication.js
       ticket: SERVER-92147
     - test_file: jstests/replsets/backwards_compatible_timeseries_catalog_options.js
@@ -243,9 +259,27 @@ last-continuous:
       ticket: SERVER-93141
     - test_file: jstests/replsets/new_primary_prevents_stale_majority_reads_on_stepup.js
       ticket: SERVER-53813
+    - test_file: jstests/sharding/resharding_collection_cloner_stale_config_retry.js
+      ticket: SERVER-94151
+    - test_file: jstests/core/write/update/upsert_duplicate_key_retry_collation.js
+      ticket: SERVER-84089
+    - test_file: jstests/core/ddl/create_indexes.js
+      ticket: SERVER-90952
+    - test_file: jstests/aggregation/bugs/server94212.js
+      ticket: SERVER-94212
   suites: null
 last-lts:
   all:
+    - test_file: jstests/change_streams/ddl_create_event.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/ddl_view_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/resume_expanded_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/show_expanded_events.js
+      ticket: SERVER-88142
+    - test_file: jstests/change_streams/timeseries.js
+      ticket: SERVER-88142
     - test_file: jstests/aggregation/bugs/lookup_using_hashed_index.js
       ticket: SERVER-92668
     - test_file: jstests/core/query/query_settings/query_settings_strictness.js
@@ -440,6 +474,12 @@ last-lts:
       ticket: SERVER-91465
     - test_file: jstests/aggregation/bugs/add_fields_adds_to_missing_fields.js
       ticket: SERVER-91784
+    - test_file: jstests/aggregation/group_with_acc_n_to_distinct_scan.js
+      ticket: SERVER-90017
+    - test_file: jstests/core/query/query_settings/query_settings_cmds_validation.js
+      ticket: SERVER-90965
+    - test_file: jstests/core/query/query_settings/query_settings_cmds.js
+      ticket: SERVER-90965
     - test_file: jstests/core/query/index_deduplication.js
       ticket: SERVER-92147
     - test_file: jstests/replsets/backwards_compatible_timeseries_catalog_options.js
@@ -500,4 +540,12 @@ last-lts:
       ticket: SERVER-93141
     - test_file: jstests/replsets/new_primary_prevents_stale_majority_reads_on_stepup.js
       ticket: SERVER-53813
+    - test_file: jstests/sharding/resharding_collection_cloner_stale_config_retry.js
+      ticket: SERVER-94151
+    - test_file: jstests/core/write/update/upsert_duplicate_key_retry_collation.js
+      ticket: SERVER-84089
+    - test_file: jstests/core/ddl/create_indexes.js
+      ticket: SERVER-90952
+    - test_file: jstests/aggregation/bugs/server94212.js
+      ticket: SERVER-94212
   suites: null
